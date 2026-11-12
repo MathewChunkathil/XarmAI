@@ -1,0 +1,12 @@
+pybullet build time: Nov 12 2026 14:39:59
+SIMULATION ONLY | grasp=kinematic attach | gripper=xArm Gripper stand-in | robot=xArm6 stand-in
+ yaw_deg  ik_err_mm  limits  no_floor    cost  verdict
+    20.0       0.01    True      True    2.93  feasible
+   110.0       0.01    True      True    4.50  feasible
+   200.0       0.01    True      True    5.93  feasible
+   290.0       0.01    True      True    4.36  feasible
+chosen yaw=20.0 deg cost=2.93
+ATTACH (kinematic)
+place IK err 0.01 mm, limits True
+DETACH
+cube final xy=(0.302,-0.200) place err=1.9 mm  OK

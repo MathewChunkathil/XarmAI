@@ -1,0 +1,82 @@
+# Cube model — ONE source of truth for sim AND real cube.
+# Sim reads this to build cube + textures. Real print net is made from this.
+# Perception (PnP) reads this. Change here only.
+schema_version: 1
+cube_id: cube_v1
+
+# ---- Geometry -------------------------------------------------------------
+edge_m: 0.050                 # cube edge. Real: measure after build, update.
+mass_kg: 0.050                # PLACEHOLDER: unmeasured (sim only uses it)
+material: PLACEHOLDER         # PLACEHOLDER: unmeasured (wood / PLA / foam?)
+
+# ---- Tags -----------------------------------------------------------------
+family: tag36h11              # OpenCV: cv2.aruco.DICT_APRILTAG_36h11
+tag_size_m: 0.040             # BLACK square edge (8 cells x 5 mm).
+                              # Real: measure printed black square, update.
+# tag36h11 layout: 6x6 data + 1 black ring = 8 cells; + 1 white ring = 10 cells.
+# Cell = 40/8 = 5 mm -> full tag with white ring = 50 mm = one full face.
+tag_cells_black: 8
+tag_cells_total: 10
+
+# ---- Frames (conventions are binding) ------------------------------------
+# Cube frame: origin = cube centre. Axes parallel to faces. +z = top face.
+# Tag frame (OpenCV ArUco convention):
+#   origin = tag centre, z = OUT of face (outward normal),
+#   x = right, y = up, as seen looking AT the face from outside.
+#   Side faces: tag "up" (y) points to cube top (+z_cube).
+# Tag corners in tag frame, OpenCV order (TL, TR, BR, BL), s = tag_size_m:
+#   (-s/2, +s/2, 0), (+s/2, +s/2, 0), (+s/2, -s/2, 0), (-s/2, -s/2, 0)
+# T_cube_tag: p_cube = R_cube_tag @ p_tag + t_cube_tag
+# R given row-major. Columns = tag x, y, z axes in cube frame.
+faces:
+  - id: 0
+    face: +z
+    t_cube_tag: [0.0, 0.0, 0.025]
+    R_cube_tag: [[1, 0, 0],
+                 [0, 1, 0],
+                 [0, 0, 1]]
+  - id: 1
+    face: +x
+    t_cube_tag: [0.025, 0.0, 0.0]
+    R_cube_tag: [[0, 0, 1],
+                 [1, 0, 0],
+                 [0, 1, 0]]
+  - id: 2
+    face: -x
+    t_cube_tag: [-0.025, 0.0, 0.0]
+    R_cube_tag: [[0, 0, -1],
+                 [-1, 0, 0],
+                 [0, 1, 0]]
+  - id: 3
+    face: +y
+    t_cube_tag: [0.0, 0.025, 0.0]
+    R_cube_tag: [[-1, 0, 0],
+                 [0, 0, 1],
+                 [0, 1, 0]]
+  - id: 4
+    face: -y
+    t_cube_tag: [0.0, -0.025, 0.0]
+    R_cube_tag: [[1, 0, 0],
+                 [0, 0, -1],
+                 [0, 1, 0]]
+# Bottom face (-z): no tag. Cube rests on it.
+
+# ---- Symmetry -------------------------------------------------------------
+yaw_symmetry_deg: 90          # report yaw folded to [-45, 45)
+
+# ---- Calibration tag (on gripper, extrinsics method A) --------------------
+calib_tag:
+  id: 10
+  family: tag36h11
+  tag_size_m: 0.060           # black square. Real: measure after print.
+  # Tag pose in TCP frame: PLACEHOLDER until mount is designed/measured.
+  t_tcp_tag: [0.0, 0.0, 0.0]  # PLACEHOLDER: unmeasured
+  R_tcp_tag: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]  # PLACEHOLDER: unmeasured
+
+# ---- Real-port checklist (do in lab, then set real_verified: true) --------
+real_verified: false
+# 1. Print net (made from this file) at 100% scale, no "fit to page".
+# 2. Measure black square with calliper -> tag_size_m.
+# 3. Measure cube edge -> edge_m. Weigh -> mass_kg.
+# 4. Check tag "up" points to top on every side face.
+# 5. Run tests/unit/test_cube_model.py + a PnP check on real image.

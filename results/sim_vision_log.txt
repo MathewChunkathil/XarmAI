@@ -1,0 +1,17 @@
+SIMULATION ONLY | rendered camera | grasp=kinematic attach | robot=xArm6 stand-in | gripper=xArm Gripper stand-in
+[1] mount alignment: 10 views, spread 1.17 mm (stands for measured tag mount)
+[2] calib A: tag-on-gripper
+  views used 14, per-view spread (mm) x/y/z 1.2/1.1/1.1
+  A tag-on-gripper       trans err    1.49 mm | rot err  0.232 deg
+[3] calib B: touch-point (6 floor tags, TCP touches each centre)
+  points used 6
+  B touch-point          trans err    5.93 mm | rot err  0.451 deg
+  active extrinsics = A (tag-on-gripper)
+[5] cube pose est xy=(0.359,0.080) vs gt (0.360,0.080) -> err 1.2 mm, yaw err 0.25 deg (mod 90)
+ yaw_deg  ik_err_mm    cost  verdict
+   205.3       0.01    5.67  feasible
+   295.3       0.01    4.10  feasible
+    25.3       0.01    2.97  feasible
+   115.3       0.01    4.54  feasible
+GRASP offset TCP->cube centre: 1.2 mm (xy)  <- calibration quality
+cube final xy=(0.304,-0.202) place err=4.7 mm  OK
