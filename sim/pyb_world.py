@@ -411,5 +411,15 @@ class SimWorld:
             self.cube = None
         self.p.removeBody(body)
 
+    def is_connected(self):
+        try:
+            return bool(self.p.isConnected())
+        except Exception:
+            return False
+
     def close(self):
-        self.p.disconnect()
+        if self.is_connected():
+            try:
+                self.p.disconnect()
+            except pb.error:
+                pass

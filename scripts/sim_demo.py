@@ -16,6 +16,7 @@ import time
 
 import cv2
 import numpy as np
+import pybullet as pb
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for p in (ROOT, *(os.path.join(ROOT, "src", k) for k in
@@ -93,6 +94,17 @@ def log(*a):
     print(*a, flush=True)
 
 
+WIN = "C270 sim"
+
+
+class UserStop(Exception):
+    """GUI window closed (PyBullet or OpenCV) -> stop cleanly."""
+
+
+def is_disconnect_error(e):
+    return isinstance(e, pb.error) and "not connected" in str(e).lower()
+
+
 class Pipeline:
     def __init__(self, args):
         self.args = args
@@ -145,9 +157,36 @@ class Pipeline:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
         self.last_frame = out
         if self.args.gui:
-            cv2.imshow("C270 sim", out)
+            cv2.imshow(WIN, out)
             cv2.waitKey(1)
+            self.check_stop()
         return out
+
+    def check_stop(self):
+        if not self.world.is_connected():
+            raise UserStop("PyBullet window closed")
+        if self.args.gui and cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+            raise UserStop("OpenCV window closed")
+
+    def hold(self):
+        """Keep windows open after the last run until q/Esc or a window is closed."""
+        img = self.last_frame if self.last_frame is not None else np.zeros((480, 640, 3), np.uint8)
+        img = img.copy()
+        txt = "Done - press q or close window"
+        cv2.rectangle(img, (6, img.shape[0] - 40), (20 + 12 * len(txt), img.shape[0] - 8), (0, 0, 0), -1)
+        cv2.putText(img, txt, (10, img.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.imshow(WIN, img)
+        try:
+            while True:
+                k = cv2.waitKey(50) & 0xFF
+                if k in (ord("q"), 27):
+                    return
+                self.check_stop()
+        except UserStop:
+            return
+        except pb.error as e:
+            if not is_disconnect_error(e):
+                raise
 
     # ---------------- step 1: intrinsics ----------------
     def calibrate_intrinsics(self):
@@ -495,22 +534,27 @@ def fmt(v, f="%.1f"):
     return "" if v == "" or v is None else (f % v if isinstance(v, (int, float, np.floating)) else str(v))
 
 
-def write_outputs(args, intr, ext, recs, runtime):
+def write_outputs(args, intr, ext, recs, runtime, partial=False, aborted=None):
     os.makedirs(args.out, exist_ok=True)
     cols = ["run", "true_x", "true_y", "true_yaw_deg", "est_x", "est_y", "est_yaw_deg", "pos_err_mm",
             "yaw_err_deg", "tags", "feasible", "chosen_yaw_deg", "chosen_rank", "grasp_offset_mm",
             "place_err_mm", "place_yaw_err_deg", "upright", "outcome"]
-    with open(os.path.join(args.out, "runs.csv"), "w", newline="") as f:
-        wr = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+    sfx = "_partial" if partial else ""
+    with open(os.path.join(args.out, "runs%s.csv" % sfx), "w", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore", restval="")
         wr.writeheader()
-        wr.writerows(recs)
+        wr.writerows(recs + ([aborted] if aborted else []))
 
     def nums(key):
         return [r[key] for r in recs if r[key] != ""]
     n_ok = sum(r["outcome"] == "SUCCESS" for r in recs)
     pe, ye, go, pl = nums("pos_err_mm"), [abs(v) for v in nums("yaw_err_deg")], nums("grasp_offset_mm"), nums("place_err_mm")
     L = []
-    L.append("# XarmAI simulation demo - results\n")
+    L.append("# XarmAI simulation demo - results%s\n" % (" (PARTIAL)" if partial else ""))
+    if partial:
+        L.append("**Stopped by user after %d runs** (run %s: ABORTED_BY_USER, not counted as failure; "
+                 "success rate denominator = completed runs).\n" % (
+                     len(recs), aborted["run"] if aborted else "-"))
     L.append("**%s**\n" % BANNER)
     L.append("Command: `python -I scripts/sim_demo.py --runs %d --seed %d` (calib poses %d, board poses %d). "
              "Runtime %.0f s. Ground truth is used for scoring only.\n" % (
@@ -564,7 +608,7 @@ def write_outputs(args, intr, ext, recs, runtime):
                                               for o in sorted({r["outcome"] for r in recs})))
     L.append("| intrinsics RMS | %.3f px |" % intr["rms"])
     L.append("| T_base_cam error | %.1f mm / %.2f deg |" % (ext["cam_pos_mm"], ext["cam_rot_deg"]))
-    with open(os.path.join(args.out, "summary.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(args.out, "summary%s.md" % sfx), "w", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")
     return n_ok
 
@@ -577,22 +621,47 @@ def main(argv=None):
     ap.add_argument("--calib-poses", type=int, default=20, help="extrinsics A poses")
     ap.add_argument("--board-poses", type=int, default=20, help="checkerboard views")
     ap.add_argument("--out", default=os.path.join(ROOT, "results", "sim_demo"))
+    ap.add_argument("--hold", action=argparse.BooleanOptionalAction, default=None,
+                    help="keep windows open after the last run (default: on with --gui)")
     args = ap.parse_args(argv)
+    if args.hold is None:
+        args.hold = args.gui
     t0 = time.time()
     log("=" * 100 + "\n" + BANNER + "\n" + "=" * 100)
     P = Pipeline(args)
+    intr = ext = None
+    recs, aborted = [], None
+    stopped = False
+    inject = int(os.environ.get("XARM_SIM_TEST_DISCONNECT_AFTER_RUN", "0") or 0)   # test hook
     try:
-        intr = P.calibrate_intrinsics()
-        ext = P.calibrate_extrinsics()
-        P.world.set_arm(P.q_ready)
-        close_ang = P.closed_angle()
-        recs = []
-        for k in range(1, args.runs + 1):
-            log("\n--- run %d/%d ---" % (k, args.runs))
-            recs.append(P.run_one(k, close_ang))
-        n_ok = write_outputs(args, intr, ext, recs, time.time() - t0)
-        log("\nSUCCESS %d/%d | summary: %s | runtime %.0f s (%d renders)" % (
-            n_ok, len(recs), os.path.join(args.out, "summary.md"), time.time() - t0, P.n_renders))
+        try:
+            intr = P.calibrate_intrinsics()
+            ext = P.calibrate_extrinsics()
+            P.world.set_arm(P.q_ready)
+            close_ang = P.closed_angle()
+            for k in range(1, args.runs + 1):
+                aborted = {"run": k, "outcome": "ABORTED_BY_USER"}
+                P.check_stop()
+                log("\n--- run %d/%d ---" % (k, args.runs))
+                recs.append(P.run_one(k, close_ang))
+                aborted = None
+                if k == inject:
+                    P.world.p.disconnect()      # simulate the user closing the PyBullet window
+        except (UserStop, pb.error) as e:
+            if isinstance(e, pb.error) and not is_disconnect_error(e):
+                raise
+            stopped = True
+        if stopped:
+            if intr is not None and ext is not None:
+                write_outputs(args, intr, ext, recs, time.time() - t0, partial=True, aborted=aborted)
+            log("\nStopped by user - partial results saved (%d completed runs): %s" % (
+                len(recs), os.path.join(args.out, "summary_partial.md")))
+        else:
+            n_ok = write_outputs(args, intr, ext, recs, time.time() - t0)
+            log("\nSUCCESS %d/%d | summary: %s | runtime %.0f s (%d renders)" % (
+                n_ok, len(recs), os.path.join(args.out, "summary.md"), time.time() - t0, P.n_renders))
+            if args.hold and args.gui:
+                P.hold()
     finally:
         P.world.close()
         if args.gui:
