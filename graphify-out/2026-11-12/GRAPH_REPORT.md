@@ -1,17 +1,17 @@
 # Graph Report - XarmAI  (2026-11-12)
 
 ## Corpus Check
-- 47 files · ~26,449 words
+- 57 files · ~35,400 words
 - Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 17 file(s) not represented in the graph (top: .stl 14, (none) 1, .obj 1)
+- Unclassified: 18 file(s) not represented in the graph (top: .stl 14, (none) 1, .csv 1)
 
 ## Summary
-- 450 nodes · 760 edges · 26 communities (25 shown, 1 thin omitted)
-- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 62 edges (avg confidence: 0.87)
+- 593 nodes · 1109 edges · 30 communities (27 shown, 3 thin omitted)
+- Extraction: 90% EXTRACTED · 10% INFERRED · 0% AMBIGUOUS · INFERRED: 107 edges (avg confidence: 0.87)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `920da246`
+- Built from commit: `3466c688`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -23,7 +23,7 @@
 - demo_sim_vision.py
 - cube_model.yaml
 - IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation
-- 7. Full roadmap — work packages
+- SimWorld
 - ROS 2 Interfaces & State Flow
 - SIM DEMO PLAN — everything in simulation (v2, 2026-11-12)
 - test_pnp.py
@@ -33,39 +33,42 @@
 - c270_sim.yaml
 - ranking.yaml
 - workspace.yaml
-- test_candidates.py
+- sim_demo.py
 - gripper.yaml
 - Constrained Top-Down Grasp Family
 - planning.yaml
 - Runtime Cube Pose Estimation Pipeline
 - Experimental Configurations A-D
 - MoveIt 2 Motion Planning
-- candidate_evaluator/README.md
+- C270SimCamera
 - calibration_tools/README.md
+- Demo script - 13 Nov 2026 (about 5 minutes)
+- XarmAI simulation demo - results
+- test_sim_demo_smoke.py
 
 ## God Nodes (most connected - your core abstractions)
-1. `FakeIK` - 14 edges
-2. `rank()` - 14 edges
-3. `IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation` - 14 edges
-4. `7. Full roadmap — work packages` - 14 edges
-5. `README Baseline Overview` - 13 edges
-6. `generate()` - 12 edges
-7. `evaluate()` - 12 edges
-8. `GraspCandidate` - 12 edges
-9. `estimate_cube_pose()` - 12 edges
-10. `gen()` - 12 edges
+1. `SimWorld` - 28 edges
+2. `Pipeline` - 20 edges
+3. `rank()` - 15 edges
+4. `FakeIK` - 14 edges
+5. `IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation` - 14 edges
+6. `7. Full roadmap — work packages` - 14 edges
+7. `C270SimCamera` - 13 edges
+8. `estimate_cube_pose()` - 13 edges
+9. `generate()` - 13 edges
+10. `evaluate()` - 13 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `2. Architecture (45 s) - from `02_SYSTEM_ARCHITECTURE.md`` --references--> `IKBackend`  [INFERRED]
+  docs/DEMO_SCRIPT.md → src/candidate_evaluator/candidate_evaluator/ik_backend.py
 - `WP7 — Digital-twin validation `[SIM]`` --references--> `set_pose()`  [INFERRED]
   IMPLEMENTATION_PLAN.md → scripts/demo_sim_vision.py
+- `Pipeline` --uses--> `C270SimCamera`  [INFERRED]
+  scripts/sim_demo.py → sim/c270_camera.py
+- `Pipeline` --uses--> `SimWorld`  [INFERRED]
+  scripts/sim_demo.py → sim/pyb_world.py
 - `Inputs` --references--> `IKBackend`  [INFERRED]
   src/candidate_evaluator/README.md → src/candidate_evaluator/candidate_evaluator/ik_backend.py
-- `test_evaluate_no_ik_and_joint_limit()` --calls--> `FakeIK`  [INFERRED]
-  tests/unit/test_candidates.py → src/candidate_evaluator/candidate_evaluator/ik_backend.py
-- `test_rejected_not_sent_to_ik()` --calls--> `FakeIK`  [INFERRED]
-  tests/unit/test_candidates.py → src/candidate_evaluator/candidate_evaluator/ik_backend.py
-- `test_evaluate_no_ik_and_joint_limit()` --calls--> `evaluate()`  [INFERRED]
-  tests/unit/test_candidates.py → src/candidate_evaluator/candidate_evaluator/ik_backend.py
 
 ## Import Cycles
 - None detected.
@@ -75,7 +78,7 @@
 - **Perception-to-Ranked-Candidate Pipeline** — 05_vision_and_calibration_runtime_pose_estimation, 06_grasp_and_motion_planning_constrained_grasp_family, 06_grasp_and_motion_planning_kinematic_evaluation, 06_grasp_and_motion_planning_moveit_2, 07_digital_twin_and_simulation_in_the_loop, 06_grasp_and_motion_planning_candidate_ranking_cost [EXTRACTED 1.00]
 - **ROS 2 Modular Manipulation Packages** — 03_software_and_repository_camera_perception, 03_software_and_repository_calibration_manager, 03_software_and_repository_scene_manager, 03_software_and_repository_grasp_planning, 03_software_and_repository_kinematics_evaluation, 03_software_and_repository_motion_planning_interface, 03_software_and_repository_digital_twin_interface, 03_software_and_repository_candidate_evaluator, 03_software_and_repository_execution_manager, 03_software_and_repository_verification_recovery, 03_software_and_repository_experiment_logger [EXTRACTED 1.00]
 
-## Communities (26 total, 1 thin omitted)
+## Communities (30 total, 3 thin omitted)
 
 ### Community 0 - "Project Specs, Roadmap & Decisions"
 Cohesion: 0.16
@@ -94,20 +97,20 @@ Cohesion: 0.25
 Nodes (6): AI Supervisor, 02 System Architecture, Task Orchestrator, ai_supervisor, Architecture Overview, 10-Step End-to-End Operating Sequence
 
 ### Community 4 - "demo_sim_vision.py"
-Cohesion: 0.09
-Nodes (25): flange_target(), ik(), move(), set_grip(), box(), detect(), detect_all(), ee_T() (+17 more)
+Cohesion: 0.07
+Nodes (29): flange_target(), ik(), move(), set_grip(), box(), detect(), detect_all(), ee_T() (+21 more)
 
 ### Community 5 - "cube_model.yaml"
 Cohesion: 0.09
 Nodes (22): calib_tag, family, id, R_tcp_tag, t_tcp_tag, tag_size_m, cube_id, edge_m (+14 more)
 
 ### Community 6 - "IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation"
-Cohesion: 0.06
-Nodes (31): 0.1 Rules for every agent / developer, 0.2 Definition of Done (per WP), 0.3 Tags used in this plan, 0. How to use this document (read first), 10. Risks and mitigations, 11. Open items (seed for `docs/OPEN_ITEMS.md`), 12. Source-doc traceability, 1. Decisions (confirmed in Q&A + research) and corrections to the source docs (+23 more)
+Cohesion: 0.04
+Nodes (45): 0.1 Rules for every agent / developer, 0.2 Definition of Done (per WP), 0.3 Tags used in this plan, 0. How to use this document (read first), 10. Risks and mitigations, 11. Open items (seed for `docs/OPEN_ITEMS.md`), 12. Source-doc traceability, 1. Decisions (confirmed in Q&A + research) and corrections to the source docs (+37 more)
 
-### Community 7 - "7. Full roadmap — work packages"
-Cohesion: 0.14
-Nodes (14): 7. Full roadmap — work packages, WP0 — Workspace, tooling, facts register `[SIM]`, WP10 — Experiments A–D `[SIM]` + `[HW]`, WP11 — Analysis and dissertation artefacts, WP12 — Experiment logger and dashboard `[SIM]`, WP1 — Interfaces and common utilities `[SIM]`, WP2 — Simulation baseline: description + Gazebo + MoveIt `[SIM]`, WP3 — Vision and calibration `[CAM]` + `[HW]` for extrinsics (+6 more)
+### Community 7 - "SimWorld"
+Cohesion: 0.06
+Nodes (20): rot_deg(), quat_from_R(), rot_err_rad(), SimWorld, _tag_tile(), Tinv(), _write_obj(), _yaml() (+12 more)
 
 ### Community 8 - "ROS 2 Interfaces & State Flow"
 Cohesion: 0.67
@@ -118,20 +121,20 @@ Cohesion: 0.20
 Nodes (9): 1. Goal, 2. What exists now (built 12 Nov) and the gaps, 3. Fake C270 camera (`config/camera/c270_sim.yaml`), 4. Code layout (port-ready), 5. Steps, models, checks, 6. Results table (`results/sim_demo/summary.md`), 7. Honesty labels (printed on screen and in the summary), 8. Open doubts (need a user answer before S1) (+1 more)
 
 ### Community 10 - "test_pnp.py"
-Cohesion: 0.07
-Nodes (35): CubeModel, load_cube_model(), tag_corners_in_tag_frame(), corners_from_pupil(), cube_yaw(), CubePoseResult, estimate_cube_pose(), fold_yaw() (+27 more)
+Cohesion: 0.09
+Nodes (30): wrap90(), CubeModel, load_cube_model(), tag_corners_in_tag_frame(), corners_from_pupil(), cube_yaw(), CubePoseResult, estimate_cube_pose() (+22 more)
 
 ### Community 11 - "CLAUDE.md — XarmAI rules (MANDATORY)"
 Cohesion: 0.40
 Nodes (4): 1. Talk = caveman. ALWAYS., 2. Model ladder, 3. Work rules, CLAUDE.md — XarmAI rules (MANDATORY)
 
 ### Community 12 - "generate.py"
-Cohesion: 0.07
-Nodes (30): generate(), _in_zone(), load_yaml(), pose_to_matrix(), quat_xyzw_to_rot(), rot_to_quat_xyzw(), tool_down_rotation(), wrap_pi() (+22 more)
+Cohesion: 0.06
+Nodes (43): generate(), _in_zone(), pose_to_matrix(), quat_xyzw_to_rot(), rot_to_quat_xyzw(), tool_down_rotation(), wrap_pi(), evaluate() (+35 more)
 
 ### Community 13 - "test_kabsch.py"
-Cohesion: 0.11
-Nodes (14): calibrate_eye_to_hand(), _project_so3(), calibrate_checkerboard(), rigid_error(), _rotvec(), umeyama(), umeyama_ransac(), _handeye_data() (+6 more)
+Cohesion: 0.14
+Nodes (13): calibrate_eye_to_hand(), _project_so3(), rigid_error(), _rotvec(), umeyama(), umeyama_ransac(), _handeye_data(), rand_T() (+5 more)
 
 ### Community 14 - "c270_sim.yaml"
 Cohesion: 0.11
@@ -142,12 +145,12 @@ Cohesion: 0.13
 Nodes (14): clearance_d_ref_m, grasp_angle_ref_rad, grasp_cov_trace_gain, kinematic_margin_max, motion_joint_weights, profile, profile_a_k, schema_version (+6 more)
 
 ### Community 16 - "workspace.yaml"
-Cohesion: 0.13
-Nodes (14): cube_workspace_box, x_m, y_m, forbidden_zones, place_target, x_m, y_m, yaw_rad (+6 more)
+Cohesion: 0.12
+Nodes (15): cube_workspace_box, x_m, y_m, forbidden_zones, place_target, x_m, y_m, yaw_rad (+7 more)
 
-### Community 17 - "test_candidates.py"
-Cohesion: 0.28
-Nodes (11): gen(), test_evaluate_no_ik_and_joint_limit(), test_gripper_width_rejected(), test_ids_and_count(), test_ok_cube_generated_with_widths(), test_out_of_workspace_rejected(), test_pregrasp_above_grasp(), test_pregrasp_below_table_rejected() (+3 more)
+### Community 17 - "sim_demo.py"
+Cohesion: 0.09
+Nodes (10): fmt(), log(), main(), Pipeline, rot_axis(), rz(), T_of(), write_outputs() (+2 more)
 
 ### Community 18 - "gripper.yaml"
 Cohesion: 0.18
@@ -173,29 +176,37 @@ Nodes (6): dashboard, experiment_logger, Dependent Evaluation Metrics, 09 Experi
 Cohesion: 0.29
 Nodes (7): kinematics_evaluation, motion_planning_interface, scene_manager, 10-Step Pick-and-Place Motion Sequence, 5-DoF Kinematic Evaluation, MoveIt 2 Motion Planning, Four-Scene Synchronisation
 
-### Community 24 - "candidate_evaluator/README.md"
-Cohesion: 0.50
-Nodes (3): Inputs, Outputs, Test
+### Community 24 - "C270SimCamera"
+Cohesion: 0.14
+Nodes (8): C270SimCamera, load_cfg(), cam(), load(), test_corners_lie_on_face(), test_ids_unique_and_five_faces(), test_rotations_and_offsets(), test_tag_fits_face()
+
+### Community 26 - "Demo script - 13 Nov 2026 (about 5 minutes)"
+Cohesion: 0.25
+Nodes (7): 1. Problem (30 s), 2. Architecture (45 s) - from `02_SYSTEM_ARCHITECTURE.md`, 3. What the sim shows, step by step (2 min), 4. Real numbers (45 s) - seed 0, from `summary.md`, 5. What it proves and what it does NOT (60 s), 6. Next steps (30 s), Demo script - 13 Nov 2026 (about 5 minutes)
+
+### Community 27 - "XarmAI simulation demo - results"
+Cohesion: 0.33
+Nodes (5): 1. Intrinsics (checkerboard, 20 views, RMS reprojection 0.186 px), 2. Extrinsics A (tag 10 on gripper, eye-to-hand, no ground truth in the solve), 3. Runs, 4. Totals, XarmAI simulation demo - results
 
 ## Knowledge Gaps
-- **22 isolated node(s):** `dashboard`, `Ubuntu 24.04 and ROS 2 Jazzy Stack`, `Confirmed Version 1 Decisions`, `Pre-Implementation Verification Backlog`, `camera_perception` (+17 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 219 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **1 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **22 isolated node(s):** `Ubuntu 24.04 and ROS 2 Jazzy Stack`, `Confirmed Version 1 Decisions`, `Pre-Implementation Verification Backlog`, `digital_twin_interface`, `xarm_app_bringup` (+17 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 272 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **3 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `7. Full roadmap — work packages` connect `7. Full roadmap — work packages` to `IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation`?**
-  _High betweenness centrality (0.099) - this node is a cross-community bridge._
-- **Are the 8 inferred relationships involving `FakeIK` (e.g. with `test_evaluate_no_ik_and_joint_limit()` and `test_rejected_not_sent_to_ik()`) actually correct?**
-  _`FakeIK` has 8 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `dashboard`, `Ubuntu 24.04 and ROS 2 Jazzy Stack`, `Confirmed Version 1 Decisions` to the rest of the system?**
+- **Why does `set_pose()` connect `demo_sim_vision.py` to `IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation`?**
+  _High betweenness centrality (0.092) - this node is a cross-community bridge._
+- **Are the 2 inferred relationships involving `SimWorld` (e.g. with `Pipeline` and `world()`) actually correct?**
+  _`SimWorld` has 2 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `Ubuntu 24.04 and ROS 2 Jazzy Stack`, `Confirmed Version 1 Decisions`, `Pre-Implementation Verification Backlog` to the rest of the system?**
   _22 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `demo_sim_vision.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.08788159111933395 - nodes in this community are weakly interconnected._
-- **Why does `set_pose()` connect `demo_sim_vision.py` to `7. Full roadmap — work packages`?**
-  _High betweenness centrality (0.098) - this node is a cross-community bridge._
-- **Are the 8 inferred relationships involving `rank()` (e.g. with `GraspCandidate` and `test_deterministic_and_tiebreak()`) actually correct?**
-  _`rank()` has 8 INFERRED edges - model-reasoned connections that need verification._
+  _Cohesion score 0.07049180327868852 - nodes in this community are weakly interconnected._
+- **Why does `WP7 — Digital-twin validation `[SIM]`` connect `IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation` to `demo_sim_vision.py`?**
+  _High betweenness centrality (0.090) - this node is a cross-community bridge._
+- **Are the 3 inferred relationships involving `Pipeline` (e.g. with `C270SimCamera` and `PyBulletIK`) actually correct?**
+  _`Pipeline` has 3 INFERRED edges - model-reasoned connections that need verification._
 - **Should `cube_model.yaml` be split into smaller, more focused modules?**
   _Cohesion score 0.08695652173913043 - nodes in this community are weakly interconnected._

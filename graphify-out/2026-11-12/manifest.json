@@ -276,15 +276,9 @@
     "semantic_hash": ""
   },
   "config/workspace/workspace.yaml": {
-    "mtime": 1794477668.8193326,
-    "seen": 1794477871.1790197,
-    "ast_hash": "469272f736eaf9d57164b9af6e4d4bcf",
-    "semantic_hash": ""
-  },
-  "scratch_probe.py": {
-    "mtime": 1794477820.9501336,
-    "seen": 1794477871.1790197,
-    "ast_hash": "06c0f9f15286fb59159cd56d372992fc",
+    "mtime": 1794478263.4734104,
+    "seen": 1794479173.9154665,
+    "ast_hash": "e767ea4b20b344c4c7e31383c8a3ff75",
     "semantic_hash": ""
   },
   "src/calibration_tools/calibration_tools/__init__.py": {
@@ -405,6 +399,78 @@
     "mtime": 1794477697.944074,
     "seen": 1794477871.1790197,
     "ast_hash": "266d2057d88267224ab0702f46ac29ce",
+    "semantic_hash": ""
+  },
+  "scripts/sim_demo.py": {
+    "mtime": 1794478898.1145284,
+    "seen": 1794479173.9154665,
+    "ast_hash": "e17b02f4cf509a0fda65bb55f28cbb4e",
+    "semantic_hash": ""
+  },
+  "sim/__init__.py": {
+    "mtime": 1794477882.1619513,
+    "seen": 1794479173.9154665,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "sim/c270_camera.py": {
+    "mtime": 1794477993.5401464,
+    "seen": 1794479173.9154665,
+    "ast_hash": "9b5c64b15bda525d21fc7cfc86cd2d22",
+    "semantic_hash": ""
+  },
+  "sim/ik_adapter.py": {
+    "mtime": 1794478411.2060938,
+    "seen": 1794479173.9154665,
+    "ast_hash": "580a436f048eccbe26f1a7c4459a666a",
+    "semantic_hash": ""
+  },
+  "sim/preview.py": {
+    "mtime": 1794477982.9252377,
+    "seen": 1794479173.9154665,
+    "ast_hash": "acaec7e9bfaff207db4dc63301bc8ac6",
+    "semantic_hash": ""
+  },
+  "sim/pyb_world.py": {
+    "mtime": 1794477982.8725357,
+    "seen": 1794479173.9154665,
+    "ast_hash": "3116c3bfd3c66285d717c1ec3d8d2c38",
+    "semantic_hash": ""
+  },
+  "tests/sim/test_sim_demo_smoke.py": {
+    "mtime": 1794478809.9367743,
+    "seen": 1794479173.9154665,
+    "ast_hash": "b12d6b9285c0ae53f394938404d4bc0c",
+    "semantic_hash": ""
+  },
+  "tests/sim/test_world.py": {
+    "mtime": 1794478064.4611187,
+    "seen": 1794479173.9154665,
+    "ast_hash": "7c03554ea5d6f6a1bce5942b9327046e",
+    "semantic_hash": ""
+  },
+  "docs/DEMO_SCRIPT.md": {
+    "mtime": 1794479083.1270611,
+    "seen": 1794479173.9154665,
+    "ast_hash": "a7c5d135341c0250bb1a59c95d13a4fd",
+    "semantic_hash": ""
+  },
+  "results/sim_demo/summary.md": {
+    "mtime": 1794479054.5989656,
+    "seen": 1794479173.9154665,
+    "ast_hash": "03941cd6c4864a92084b54959a6967c9",
+    "semantic_hash": ""
+  },
+  "sim/README.md": {
+    "mtime": 1794478076.4825244,
+    "seen": 1794479173.9154665,
+    "ast_hash": "240c381fc9deabce18adcc44b1712c51",
+    "semantic_hash": ""
+  },
+  "results/sim_demo/preview_cam.png": {
+    "mtime": 1794478068.9792926,
+    "seen": 1794479173.9154665,
+    "ast_hash": "2c13accd620643471af185a54700427e",
     "semantic_hash": ""
   }
 }
