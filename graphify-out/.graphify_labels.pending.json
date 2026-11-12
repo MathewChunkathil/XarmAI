@@ -1,10 +1,25 @@
 {
+  "1": "UFACTORY xArm 5",
   "2": "Deterministic Pre-Execution Gate",
   "4": "demo_sim_vision.py",
   "5": "cube_model.yaml",
   "6": "IMPLEMENTATION PLAN — xArm 5 AI-Assisted Autonomous Manipulation",
   "7": "7. Full roadmap — work packages",
   "9": "SIM DEMO PLAN — everything in simulation (v2, 2026-11-12)",
-  "10": "test_cube_model.py",
-  "11": "CLAUDE.md — XarmAI rules (MANDATORY)"
+  "10": "test_pnp.py",
+  "11": "CLAUDE.md — XarmAI rules (MANDATORY)",
+  "12": "generate.py",
+  "13": "test_kabsch.py",
+  "14": "c270_sim.yaml",
+  "15": "ranking.yaml",
+  "16": "workspace.yaml",
+  "17": "test_candidates.py",
+  "18": "gripper.yaml",
+  "19": "Constrained Top-Down Grasp Family",
+  "20": "planning.yaml",
+  "21": "Runtime Cube Pose Estimation Pipeline",
+  "22": "Experimental Configurations A-D",
+  "23": "MoveIt 2 Motion Planning",
+  "24": "candidate_evaluator/README.md",
+  "25": "calibration_tools/README.md"
 }

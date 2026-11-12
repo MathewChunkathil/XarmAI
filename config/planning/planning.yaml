@@ -1,0 +1,9 @@
+# Planning / candidate generation tunables (IMPLEMENTATION_PLAN §5.6). Units: m, deg, scale 0..1.
+schema_version: 1
+yaw_offsets_deg: [0.0]            # deg, extra +/- delta added to each psi_k = yaw_c + k*90deg
+grasp_height_offset_m: 0.0        # m, TCP z above cube centre (0 = fingertips at mid-height)
+approach_distance_m: 0.10         # m, pregrasp above grasp
+lift_distance_m: 0.08             # m, lift above grasp
+table_clearance_m: 0.02           # m, pregrasp z must be >= table_top_z + this
+max_velocity_scaling: 0.2         # commissioning limit (§5.8)
+max_acceleration_scaling: 0.2     # commissioning limit (§5.8)

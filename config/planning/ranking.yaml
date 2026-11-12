@@ -1,0 +1,18 @@
+# Candidate ranking (IMPLEMENTATION_PLAN §5.7). total = sum(w*norm), LOWER wins.
+# Weights are experimental parameters (all 0.2 by default); tune only with recorded data.
+schema_version: 1
+profile: B                        # A = fixed candidate k=0 (bypass ranking); B/C/D = ranked
+profile_a_k: 0                    # yaw index used by profile A
+weights:                          # unitless
+  motion: 0.2
+  clearance: 0.2
+  kinematic: 0.2
+  grasp: 0.2
+  time: 0.2
+clearance_d_ref_m: 0.05           # m, clearance norm = 1 - min(raw/d_ref, 1)
+kinematic_margin_max: 0.5         # normalised joint margin max (0.5 = mid-range)
+grasp_angle_ref_rad: 0.7853981633974483   # pi/4, grasp norm = raw/ref
+grasp_cov_trace_gain: 0.0         # rad per unit pose-covariance trace added to grasp raw. PLACEHOLDER: unmeasured
+motion_joint_weights: [1.0, 1.0, 1.0, 1.0, 1.0]   # per-joint weights, 5 joints. PLACEHOLDER
+# Missing data rule: a term whose raw value is None (clearance/time/kinematic/motion
+# not computed yet) is normalised to 0 (neutral, no penalty) and noted in ScoreBreakdown.notes.

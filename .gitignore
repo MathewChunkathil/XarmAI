@@ -11,3 +11,5 @@ data/*
 graphify-out/cache/
 results/sim_demo/frames/
 sim/urdf_build/
+sim/_cache/
+*.egg-info/

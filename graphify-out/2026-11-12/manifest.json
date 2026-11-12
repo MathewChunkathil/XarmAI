@@ -120,9 +120,9 @@
     "semantic_hash": ""
   },
   "IMPLEMENTATION_PLAN.md": {
-    "mtime": 1794396609.9359698,
-    "seen": 1794477002.823533,
-    "ast_hash": "53a3f94ce96688c542ff7a6b11ba3e44",
+    "mtime": 1794477310.866498,
+    "seen": 1794477325.1000605,
+    "ast_hash": "6bdac060bceb4452b81188b5524e1887",
     "semantic_hash": ""
   },
   "requirements.txt": {
@@ -243,6 +243,12 @@
     "mtime": 1794475008.9002948,
     "seen": 1794477002.823533,
     "ast_hash": "1f6174edaaab785758554f905e7d8bc4",
+    "semantic_hash": ""
+  },
+  "SIM_DEMO_PLAN.md": {
+    "mtime": 1794477310.802008,
+    "seen": 1794477325.1000605,
+    "ast_hash": "806ba4045d104c1c19bb248132397f21",
     "semantic_hash": ""
   }
 }

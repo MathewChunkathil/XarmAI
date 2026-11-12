@@ -1,0 +1,30 @@
+# Fake Logitech C270 for the sim (SIM_DEMO_PLAN §3). SIMULATION ONLY.
+# Spec values (Logitech): 1280x720, diagonal FOV 55 deg, fixed focus.
+# Everything else is tagged PLACEHOLDER and is NOT a measurement.
+schema_version: 1
+width: 1280            # Logitech spec (720p)
+height: 720            # Logitech spec
+diag_fov_deg: 55.0     # Logitech spec
+# Derived in code (sim/c270_camera.py), pixels, square pixels, centred principal point:
+#   diag = sqrt(1280^2+720^2) = 1468.6 px ; f = (diag/2)/tan(27.5 deg) = 1410.5 px
+#   fx = fy = 1410.5 ; cx = 640.0 ; cy = 360.0   (HFOV ~ 48.4 deg, VFOV ~ 28.0 deg)
+focus: fixed           # Logitech spec
+
+# OpenCV model [k1, k2, p1, p2, k3]
+distortion: [-0.05, 0.01, 0.0, 0.0, 0.0]   # PLACEHOLDER: tuned by eye (small barrel)
+
+noise:
+  read_sigma_gray: 2.5      # PLACEHOLDER: tuned by eye (read noise, gray levels)
+  shot_gain: 0.04           # PLACEHOLDER: tuned by eye (shot var = gain*I; sigma at I=200 ~2.8)
+blur_sigma_px: 0.8          # PLACEHOLDER: tuned by eye
+mjpeg_quality: 80           # PLACEHOLDER: tuned by eye (typical webcam MJPG)
+brightness_jitter: 0.15     # PLACEHOLDER: tuned by eye (+-15 % per frame)
+
+near_m: 0.05                # PLACEHOLDER: tuned by eye
+far_m: 3.0                  # PLACEHOLDER: tuned by eye
+
+# Mount in world (= robot base) frame, metres. PLACEHOLDER: tuned by eye
+mount:
+  eye: [0.65, 0.0, 0.60]
+  target: [0.35, 0.0, 0.05]
+  up: [0.0, 0.0, 1.0]

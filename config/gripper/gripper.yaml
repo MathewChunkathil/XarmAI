@@ -1,0 +1,13 @@
+# Gripper config (IMPLEMENTATION_PLAN §5.5). Units: metres, seconds, radians.
+# Gripper model is UNIDENTIFIED (photo pending); sim uses xArm Gripper as a stand-in.
+schema_version: 1
+backend: sim                      # sim | xarm_gripper | dh_modbus
+tcp_offset_xyz_m: [0.0, 0.0, 0.172]   # m, flange->TCP. PLACEHOLDER: unmeasured (xArm Gripper nominal)
+tcp_offset_rpy: [0.0, 0.0, 0.0]       # rad. PLACEHOLDER: unmeasured
+max_open_m: 0.085                 # m, max jaw opening. PLACEHOLDER: unmeasured
+min_close_m: 0.0                  # m. PLACEHOLDER: unmeasured
+grasp_close_width_m: 0.046        # m, commanded close width (cube 0.050 minus squeeze). PLACEHOLDER: tune
+open_margin_m: 0.015              # m, open width = cube edge + margin
+command_timeout_s: 3.0            # s. PLACEHOLDER: unmeasured
+feedback_available: true          # false -> verification relies on camera only. PLACEHOLDER: unmeasured
+# closing axis convention (code): tool +y axis; fingers close along it.
