@@ -402,9 +402,9 @@
     "semantic_hash": "266d2057d88267224ab0702f46ac29ce"
   },
   "scripts/sim_demo.py": {
-    "mtime": 1794484372.8103333,
-    "seen": 1794484451.1586812,
-    "ast_hash": "b779acc9c3258864917c7a403a914359",
+    "mtime": 1794485397.0951433,
+    "seen": 1794485472.2263422,
+    "ast_hash": "b24a8c7e131cf4c64823d0a981822b97",
     "semantic_hash": ""
   },
   "sim/__init__.py": {
@@ -432,9 +432,9 @@
     "semantic_hash": "acaec7e9bfaff207db4dc63301bc8ac6"
   },
   "sim/pyb_world.py": {
-    "mtime": 1794484372.8093367,
-    "seen": 1794484451.1586812,
-    "ast_hash": "abd7dc7cbcd242adbef97f1ce0bf714e",
+    "mtime": 1794485397.094139,
+    "seen": 1794485472.2263422,
+    "ast_hash": "9f069f9c7f3b8eed706820c54701e11a",
     "semantic_hash": ""
   },
   "tests/sim/test_sim_demo_smoke.py": {
@@ -486,21 +486,15 @@
     "semantic_hash": ""
   },
   "scripts/sim_app.py": {
-    "mtime": 1794484439.0940466,
-    "seen": 1794484451.1586812,
-    "ast_hash": "912ac297caeedd318a57690b67c32bc5",
+    "mtime": 1794485390.1084402,
+    "seen": 1794485472.2263422,
+    "ast_hash": "ccbac8e9eea0b7e0c1ff84631885d356",
     "semantic_hash": ""
   },
   "sim/calib_cache.py": {
     "mtime": 1794482916.761305,
     "seen": 1794483896.380753,
     "ast_hash": "1569181524610929eb550e6057ea30d5",
-    "semantic_hash": ""
-  },
-  "results/sim_app/frames/run_01.png": {
-    "mtime": 1794484388.3327465,
-    "seen": 1794484451.1586812,
-    "ast_hash": "2f8e2760058866b963c3ff1e936b2a4e",
     "semantic_hash": ""
   },
   "x/frames/run_01.png": {
@@ -717,6 +711,60 @@
     "mtime": 1794484323.1773987,
     "seen": 1794484451.1596828,
     "ast_hash": "a78cae7d1e6ee3a74886dfafc2e97d8c",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/01_idle_3d.png": {
+    "mtime": 1794485418.654579,
+    "seen": 1794485472.2263422,
+    "ast_hash": "3fed518476dda2ada62971eca5e5c706",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/01_idle_dpg.png": {
+    "mtime": 1794485418.243047,
+    "seen": 1794485472.2263422,
+    "ast_hash": "a11d5ab5b6bfdcd1eb9136c3ae01ddfa",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/01_idle_screen.png": {
+    "mtime": 1794485418.8335817,
+    "seen": 1794485472.2263422,
+    "ast_hash": "6382380dfe7c27d71f05b326ca41a0c7",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/02_mid_motion_3d.png": {
+    "mtime": 1794485424.4176912,
+    "seen": 1794485472.2263422,
+    "ast_hash": "530a3ec4d8d0f2a6f99e9db9fd8bc49e",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/02_mid_motion_dpg.png": {
+    "mtime": 1794485424.0921488,
+    "seen": 1794485472.2263422,
+    "ast_hash": "ae6d8d409a4522d25ab677257dc97590",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/02_mid_motion_screen.png": {
+    "mtime": 1794485424.555982,
+    "seen": 1794485472.2263422,
+    "ast_hash": "a6e20e23be80e201ea47d25d1bb20937",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/03_after_place_3d.png": {
+    "mtime": 1794485427.7341917,
+    "seen": 1794485472.2263422,
+    "ast_hash": "43ac3903ed5a403225fe25ba802df795",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/03_after_place_dpg.png": {
+    "mtime": 1794485427.425161,
+    "seen": 1794485472.2263422,
+    "ast_hash": "d168efc204813651d302983547c094cb",
+    "semantic_hash": ""
+  },
+  "results/sim_app/shots/03_after_place_screen.png": {
+    "mtime": 1794485427.8593342,
+    "seen": 1794485472.2263422,
+    "ast_hash": "74636ad2c6d2958eb7ca4281140fe2e0",
     "semantic_hash": ""
   }
 }

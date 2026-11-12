@@ -98,7 +98,7 @@ def _tag_tile(tag_id, tile_px, tag_frac):
 
 
 class SimWorld:
-    def __init__(self, gui=False, cfg_paths=None, gui_panel=False, clean=False, window=(1200, 900)):
+    def __init__(self, gui=False, cfg_paths=None, gui_panel=False, clean=False, window=(1200, 900), init_q=None):
         """clean=True (sim_app.py): calm 3D view only - no debug panes/sliders, shadows on, nicer colours."""
         self.gui = gui
         self.clean = bool(clean and gui)
@@ -183,7 +183,7 @@ class SimWorld:
         self.calib_tag_body = None
         self.T_tcp_tag = None
         self._quad_off = np.eye(4)
-        self.set_arm(self.workspace.get("ready_joint_state_rad", [0, -0.5, -0.5, 0, 0]))
+        self.set_arm(init_q if init_q is not None else self.workspace.get("ready_joint_state_rad", [0, -0.5, -0.5, 0, 0]))
         self.set_gripper(0.0)
         self._build_stand()
 
@@ -210,26 +210,6 @@ class SimWorld:
                                                             rgbaColor=[0.22, 0.23, 0.25, 1]),
                                  (eye - 0.02 * fwd).tolist(), quat_from_R(R))
         self.stand = [pole, base, body]
-
-    @contextlib.contextmanager
-    def camera_clean(self):
-        """Hide the (visual-only) stand and GL shadows while the C270 sim camera renders."""
-        if not self.gui or not getattr(self, "stand", None):
-            yield
-            return
-        p = self.p
-        cols = [p.getVisualShapeData(b)[0][7] for b in self.stand]
-        for b, c in zip(self.stand, cols):
-            p.changeVisualShape(b, -1, rgbaColor=[c[0], c[1], c[2], 0.0])
-        if self.clean:
-            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
-        try:
-            yield
-        finally:
-            for b, c in zip(self.stand, cols):
-                p.changeVisualShape(b, -1, rgbaColor=list(c))
-            if self.clean:
-                p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
 
     # ---------------- textured bodies ----------------
     def _textured_quad(self, img, width, height, name):

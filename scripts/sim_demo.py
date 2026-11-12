@@ -114,7 +114,8 @@ class Pipeline:
         self.app = bool(getattr(args, "app", False))           # sim_app.py drives the UI (Dear PyGui), no OpenCV UI
         self.cv_ui = bool(args.gui and not self.app)           # legacy OpenCV window + PyBullet debug panel
         self.world = SimWorld(gui=args.gui, gui_panel=args.gui, clean=self.app,
-                               window=getattr(args, "window", (1200, 900)))
+                               window=getattr(args, "window", (1200, 900)),
+                               init_q=S["park_q"] if self.app else None)
         self.cam = C270SimCamera(load_cfg(self.world.cfg_paths["camera"]), np.random.default_rng(args.seed + 1))
         self.model = load_cube_model()
         self.det = Detector(families="tag36h11", nthreads=1, quad_decimate=1.0)
@@ -125,7 +126,13 @@ class Pipeline:
         self.q_ready = list(self.ws["ready_joint_state_rad"])
         self.table_z = float(self.ws["table_top_z_m"])
         self.edge = self.model.edge_m
-        self.ik = PyBulletIK(self.world)
+        # hidden shadow world: all IK/FK and all C270 rendering happen here, so the visible GUI world only
+        # ever shows the real motion (no flashing arm poses, no stand/shadow toggling). Headless: aux IS world.
+        if self.world.gui:
+            self.aux = SimWorld(gui=False, cfg_paths=self.world.cfg_paths)
+        else:
+            self.aux = self.world
+        self.ik = PyBulletIK(self.aux)
         self.K = self.dist = None           # ESTIMATED intrinsics (pipeline uses only these)
         self.T_base_cam = None              # ESTIMATED extrinsics
         self.last_frame = None
@@ -141,6 +148,11 @@ class Pipeline:
         if self.cv_ui:
             self.world.on_step = self._on_step
         os.makedirs(os.path.join(args.out, "frames"), exist_ok=True)
+
+    def close(self):
+        if self.aux is not self.world:
+            self.aux.close()
+        self.world.close()
 
     # ---------------- kinematics panel (GUI only) ----------------
     def panel_lines(self):
@@ -211,10 +223,29 @@ class Pipeline:
                                [1, 0, 0], 3)
 
     # ---------------- camera / detection ----------------
+    def sync_aux(self):
+        """Copy arm / gripper / cube state of the visible world into the hidden aux world (no stepping)."""
+        w, x = self.world, self.aux
+        if x is w:
+            return
+        q = w.arm_q()
+        g = w.p.getJointState(w.robot, w.grip_j[0])[0]
+        x.set_arm(q)
+        x.set_gripper(g)
+        if w.cube is None:
+            if x.cube is not None:
+                x.remove(x.cube)
+            return
+        pos, orn = w.p.getBasePositionAndOrientation(w.cube)
+        if x.cube is None:
+            x.spawn_cube(pos[0], pos[1], 0.0)
+        x.p.resetBasePositionAndOrientation(x.cube, pos, orn)
+        x.p.resetBaseVelocity(x.cube, [0, 0, 0], [0, 0, 0])
+
     def grab(self):
         self.n_renders += 1
-        with self.world.camera_clean():
-            return self.cam.render(self.world.p, gui=self.world.gui)
+        self.sync_aux()
+        return self.cam.render(self.aux.p, gui=False)
 
     def detect(self, img):
         """-> {tag_id: corners 4x2 (OpenCV TL,TR,BR,BL)}"""
@@ -285,7 +316,8 @@ class Pipeline:
         """Install a cached calibration (K, dist, T_base_cam, closed-gripper angle)."""
         self.K, self.dist, self.T_base_cam = d["K"], d["dist"], d["T_base_cam"]
         self.close_ang = d["close_ang"]
-        self.world.set_arm(self.q_ready)
+        if not self.app:                     # app sets its own park pose; avoid a visible ready-pose flash
+            self.world.set_arm(self.q_ready)
 
     def run_calibrations(self):
         """Intrinsics + extrinsics A. With --gui they run in a hidden headless SimWorld (same configs / camera
@@ -317,7 +349,7 @@ class Pipeline:
         self.K, self.dist, self.T_base_cam = hp.K, hp.dist, hp.T_base_cam
         self.rng, self.cam.rng = hp.rng, hp.cam.rng       # continue the same random streams
         self.n_renders += hp.n_renders
-        hp.world.close()
+        hp.close()
         p.removeUserDebugItem(txt)
         return intr, ext
 
@@ -506,7 +538,7 @@ class Pipeline:
 
     def closed_angle(self):
         """Gripper joint angle at which the finger AABB gap equals the cube edge (visual only)."""
-        w, p = self.world, self.world.p
+        w, p = self.aux, self.aux.p
         lname = {p.getJointInfo(w.robot, i)[12].decode(): i for i in range(p.getNumJoints(w.robot))}
         old_q, old_g = w.arm_q(), p.getJointState(w.robot, w.grip_j[0])[0]
         w.set_arm(self.q_ready)       # tcp y == -world y here, so the world-y AABB gap is the jaw gap
@@ -876,7 +908,7 @@ def main(argv=None):
             if args.hold and args.gui:
                 P.hold()
     finally:
-        P.world.close()
+        P.close()
         if args.gui:
             cv2.destroyAllWindows()
     return 0

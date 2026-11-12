@@ -1,17 +1,17 @@
 # Graph Report - XarmAI  (2026-11-12)
 
 ## Corpus Check
-- 61 files · ~41,694 words
+- 61 files · ~41,777 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 18 file(s) not represented in the graph (top: .stl 14, (none) 1, .csv 1)
 
 ## Summary
-- 727 nodes · 1369 edges · 52 communities (35 shown, 17 thin omitted)
-- Extraction: 90% EXTRACTED · 10% INFERRED · 0% AMBIGUOUS · INFERRED: 137 edges (avg confidence: 0.86)
+- 728 nodes · 1372 edges · 60 communities (37 shown, 23 thin omitted)
+- Extraction: 90% EXTRACTED · 10% INFERRED · 0% AMBIGUOUS · INFERRED: 138 edges (avg confidence: 0.86)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `891e40f2`
+- Built from commit: `837f93c1`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -19,8 +19,8 @@
 - Candidate Generation & IK Evaluator
 - Tag Generation & PnP Perception
 - SimWorld
-- AprilTag Cube Model & Geometry
-- Sim Demo Pipeline & CLI
+- test_pnp.py
+- sim_demo.py
 - Project Rules & Core Decisions
 - Hand-Eye Calibration & Kabsch
 - Cube Model YAML Configuration
@@ -55,17 +55,22 @@
 - App
 - test_world.py
 - cube_model.py
-- cv2
-- os
-- C270SimCamera
+- calibrate_checkerboard
+- numpy
 - calib_cache.py
-- demo_pick_place.py
-- test_sim_demo_disconnect.py
+- pyb_world.py
+- sim_app.py
+- ._run_one
+- Pipeline
+- .interactive_loop
+- PyBulletIK
+- .ik_tcp
+- .add_zone_overlays
 
 ## God Nodes (most connected - your core abstractions)
-1. `SimWorld` - 35 edges
-2. `App` - 33 edges
-3. `Pipeline` - 33 edges
+1. `Pipeline` - 35 edges
+2. `SimWorld` - 34 edges
+3. `App` - 33 edges
 4. `AprilTag tag36h11 Family` - 19 edges
 5. `rank()` - 15 edges
 6. `FakeIK` - 14 edges
@@ -75,6 +80,8 @@
 10. `README Baseline Overview` - 13 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `test_pupil_corner_order_matches_opencv()` --calls--> `corners_from_pupil()`  [INFERRED]
+  tests/unit/test_pnp.py → src/cube_perception/cube_perception/pnp.py
 - `Demo Seed 0 Results (10/10)` --semantically_similar_to--> `10-Run Sim Trials Summary (10/10, 0.32 mm mean place err)`  [INFERRED] [semantically similar]
   docs/DEMO_SCRIPT.md → results/sim_demo/summary.md
 - `Pipeline` --uses--> `SimWorld`  [INFERRED]
@@ -83,8 +90,6 @@
   scripts/sim_demo.py → src/candidate_evaluator/candidate_evaluator/generate.py
 - `world()` --uses--> `SimWorld`  [INFERRED]
   tests/sim/test_world.py → sim/pyb_world.py
-- `cam()` --uses--> `C270SimCamera`  [INFERRED]
-  tests/sim/test_world.py → sim/c270_camera.py
 
 ## Import Cycles
 - None detected.
@@ -98,27 +103,27 @@
 - **tag36h11 Fiducial Marker Suite (Physical, Phone, Simulation)** — results_tags_tag36h11_40mm_apriltag_tag36h11_family, results_tags_tag36h11_40mm_physical_40mm_cube_markers, results_tags_sim_tag_0_simulation_fiducial_markers, results_tags_phone_id0_phone_screen_fiducial_markers, results_tags_tag36h11_40mm_sheet [EXTRACTED 1.00]
 - **Sim Demo Verification & Results Artifacts** — docs_demo_script_seed0_results, results_sim_demo_summary_intrinsics, results_sim_demo_summary_extrinsics_a, results_sim_demo_summary_trials [INFERRED 0.95]
 
-## Communities (52 total, 17 thin omitted)
+## Communities (60 total, 23 thin omitted)
 
 ### Community 0 - "Candidate Generation & IK Evaluator"
 Cohesion: 0.06
 Nodes (41): generate(), _in_zone(), load_yaml(), pose_to_matrix(), quat_xyzw_to_rot(), rot_to_quat_xyzw(), tool_down_rotation(), wrap_pi() (+33 more)
 
 ### Community 1 - "Tag Generation & PnP Perception"
-Cohesion: 0.17
-Nodes (20): box(), detect(), detect_all(), ee_T(), flange_target(), go_home(), ik(), kabsch() (+12 more)
+Cohesion: 0.11
+Nodes (24): flange_target(), ik(), move(), set_grip(), box(), detect(), detect_all(), ee_T() (+16 more)
 
 ### Community 2 - "SimWorld"
-Cohesion: 0.06
-Nodes (8): quat_from_R(), SimWorld, box(), zone(), _tag_tile(), _write_obj(), _yaml(), test_cube_rests_on_table()
+Cohesion: 0.10
+Nodes (5): quat_from_R(), SimWorld, _tag_tile(), _write_obj(), _yaml()
 
-### Community 3 - "AprilTag Cube Model & Geometry"
-Cohesion: 0.11
-Nodes (27): wrap90(), corners_from_pupil(), cube_yaw(), CubePoseResult, estimate_cube_pose(), fold_yaw(), median_pose(), _rt_to_T() (+19 more)
+### Community 3 - "test_pnp.py"
+Cohesion: 0.25
+Nodes (16): _check_n(), make_T(), pose_err(), project(), rot(), test_high_reproj_rejected(), test_median_pose(), test_no_tags_and_unknown_id() (+8 more)
 
-### Community 4 - "Sim Demo Pipeline & CLI"
-Cohesion: 0.06
-Nodes (12): fmt(), is_disconnect_error(), log(), main(), Pipeline, rot_axis(), rot_deg(), rz() (+4 more)
+### Community 4 - "sim_demo.py"
+Cohesion: 0.15
+Nodes (9): fmt(), is_disconnect_error(), log(), main(), rot_deg(), wrap90(), write_outputs(), fold_yaw() (+1 more)
 
 ### Community 5 - "Project Rules & Core Decisions"
 Cohesion: 0.08
@@ -217,48 +222,56 @@ Cohesion: 0.67
 Nodes (3): Fake Logitech C270 Camera Model (c270_sim.yaml), Sim Checkerboard Intrinsics Calibration, intrinsics.calibrate_checkerboard
 
 ### Community 38 - "App"
-Cohesion: 0.07
-Nodes (11): App, prog(), solve(), button_theme(), Cancel, f1(), main(), make_theme() (+3 more)
+Cohesion: 0.12
+Nodes (5): App, solve(), main(), place_pybullet_window(), cb()
 
 ### Community 43 - "test_world.py"
-Cohesion: 0.16
-Nodes (9): rot_err_rad(), cam(), cube_frame(), _tag_R_world(), test_calib_tag_visible(), test_checkerboard_found(), test_ik_top_down(), test_tag_frames_match_cube_model() (+1 more)
+Cohesion: 0.11
+Nodes (9): tex(), C270SimCamera, load_cfg(), cam(), cube_frame(), test_calib_tag_visible(), test_checkerboard_found(), test_detect_ids_only_model_ids() (+1 more)
 
 ### Community 44 - "cube_model.py"
-Cohesion: 0.18
+Cohesion: 0.16
 Nodes (8): CubeModel, load_cube_model(), tag_corners_in_tag_frame(), load(), test_corners_lie_on_face(), test_ids_unique_and_five_faces(), test_rotations_and_offsets(), test_tag_fits_face()
 
-### Community 45 - "cv2"
-Cohesion: 0.17
-Nodes (3): load_cfg(), calibrate_checkerboard(), test_detect_ids_only_model_ids()
+### Community 47 - "numpy"
+Cohesion: 0.20
+Nodes (8): corners_from_pupil(), cube_yaw(), CubePoseResult, estimate_cube_pose(), median_pose(), _rt_to_T(), _rz(), to_base()
 
 ### Community 48 - "calib_cache.py"
-Cohesion: 0.31
+Cohesion: 0.19
 Nodes (4): config_hash(), load(), save(), _ser()
 
-### Community 49 - "demo_pick_place.py"
-Cohesion: 0.15
-Nodes (6): flange_target(), ik(), move(), set_grip(), T_from(), Tinv()
+### Community 49 - "pyb_world.py"
+Cohesion: 0.14
+Nodes (6): rot_err_rad(), T_from(), Tinv(), _tag_R_world(), test_cube_rests_on_table(), test_tag_frames_match_cube_model()
+
+### Community 50 - "sim_app.py"
+Cohesion: 0.10
+Nodes (8): prog(), button_theme(), Cancel, f1(), make_theme(), sc(), test_sim_demo_disconnect_partial(), test_sim_demo_headless_two_runs()
+
+### Community 51 - "._run_one"
+Cohesion: 0.20
+Nodes (3): rot_axis(), rz(), T_of()
 
 ## Knowledge Gaps
 - **61 isolated node(s):** `SIM_DEMO_PLAN.md (v2)`, `digital_twin_interface`, `xarm_app_bringup`, `Physical Commissioning Sequence`, `Simulation Fidelity Levels 1-3` (+56 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 290 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **17 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **23 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `SimWorld` connect `SimWorld` to `demo_pick_place.py`, `test_world.py`, `Sim Demo Pipeline & CLI`, `cv2`?**
-  _High betweenness centrality (0.053) - this node is a cross-community bridge._
+- **Why does `Pipeline` connect `Pipeline` to `SimWorld`, `sim_demo.py`, `App`, `cube_model.py`, `numpy`, `calib_cache.py`, `._run_one`, `.interactive_loop`, `.closed_angle`, `.draw_zones`?**
+  _High betweenness centrality (0.055) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `SimWorld` (e.g. with `Pipeline` and `world()`) actually correct?**
   _`SimWorld` has 2 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `SIM_DEMO_PLAN.md (v2)`, `digital_twin_interface`, `xarm_app_bringup` to the rest of the system?**
   _61 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Candidate Generation & IK Evaluator` be split into smaller, more focused modules?**
-  _Cohesion score 0.06126126126126126 - nodes in this community are weakly interconnected._
-- **Why does `Pipeline` connect `Sim Demo Pipeline & CLI` to `SimWorld`, `App`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
-- **Should `SimWorld` be split into smaller, more focused modules?**
-  _Cohesion score 0.06431372549019608 - nodes in this community are weakly interconnected._
-- **Should `AprilTag Cube Model & Geometry` be split into smaller, more focused modules?**
-  _Cohesion score 0.11336032388663968 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06280701754385964 - nodes in this community are weakly interconnected._
+- **Why does `SimWorld` connect `SimWorld` to `sim_demo.py`, `test_world.py`, `cube_model.py`, `calib_cache.py`, `pyb_world.py`, `Pipeline`, `.ik_tcp`, `.add_zone_overlays`?**
+  _High betweenness centrality (0.051) - this node is a cross-community bridge._
+- **Should `Tag Generation & PnP Perception` be split into smaller, more focused modules?**
+  _Cohesion score 0.1051693404634581 - nodes in this community are weakly interconnected._
+- **Why does `App` connect `App` to `sim_app.py`?**
+  _High betweenness centrality (0.041) - this node is a cross-community bridge._

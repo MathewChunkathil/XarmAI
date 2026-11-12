@@ -276,9 +276,8 @@ class App:
         """Cheap idle preview of the C270 view: same view/projection, 640x360, no distortion/noise/JPEG
         (the full camera model is used for perception and after each run)."""
         cam = self.P.cam
-        with self.w.camera_clean():
-            img = self.w.p.getCameraImage(640, 360, cam.view, cam.proj, renderer=pb.ER_BULLET_HARDWARE_OPENGL,
-                                          shadow=0)[2]
+        self.P.sync_aux()
+        img = self.P.aux.p.getCameraImage(640, 360, cam.view, cam.proj, renderer=pb.ER_TINY_RENDERER, shadow=0)[2]
         return cv2.cvtColor(np.asarray(img, np.uint8).reshape(360, 640, 4)[:, :, :3], cv2.COLOR_RGB2BGR)
 
     def set_cam(self, bgr):
@@ -828,7 +827,7 @@ class App:
         if self.worker is not None:
             self.worker.join(timeout=8)
         try:
-            self.w.close()
+            self.P.close()
         except Exception:
             pass
         try:

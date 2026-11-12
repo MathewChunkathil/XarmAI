@@ -1,8 +1,6 @@
 {
   "0": "Candidate Generation & IK Evaluator",
   "1": "Tag Generation & PnP Perception",
-  "3": "AprilTag Cube Model & Geometry",
-  "4": "Sim Demo Pipeline & CLI",
   "5": "Project Rules & Core Decisions",
   "6": "Hand-Eye Calibration & Kabsch",
   "7": "Cube Model YAML Configuration",
