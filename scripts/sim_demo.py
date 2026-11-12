@@ -33,6 +33,7 @@ from candidate_evaluator.ik_backend import joint_margin  # noqa: E402
 from cube_perception import (corners_from_pupil, estimate_cube_pose, fold_yaw, cube_yaw,  # noqa: E402
                              load_cube_model, median_pose, to_base)
 from cube_perception.cube_model import tag_corners_in_tag_frame  # noqa: E402
+from sim import calib_cache  # noqa: E402
 from sim.c270_camera import C270SimCamera, load_cfg  # noqa: E402
 from sim.ik_adapter import PyBulletIK  # noqa: E402
 from sim.pyb_world import SimWorld, T_from, Tinv, rot_err_rad  # noqa: E402
@@ -109,7 +110,11 @@ class Pipeline:
     def __init__(self, args):
         self.args = args
         self.rng = np.random.default_rng(args.seed)
-        self.world = SimWorld(gui=args.gui)
+        self.interactive = bool(args.gui and not getattr(args, "auto", False))
+        self.app = bool(getattr(args, "app", False))           # sim_app.py drives the UI (Dear PyGui), no OpenCV UI
+        self.cv_ui = bool(args.gui and not self.app)           # legacy OpenCV window + PyBullet debug panel
+        self.world = SimWorld(gui=args.gui, gui_panel=args.gui, clean=self.app,
+                               window=getattr(args, "window", (1200, 900)))
         self.cam = C270SimCamera(load_cfg(self.world.cfg_paths["camera"]), np.random.default_rng(args.seed + 1))
         self.model = load_cube_model()
         self.det = Detector(families="tag36h11", nthreads=1, quad_decimate=1.0)
@@ -125,12 +130,91 @@ class Pipeline:
         self.T_base_cam = None              # ESTIMATED extrinsics
         self.last_frame = None
         self.n_renders = 0
+        self.close_ang = None
+        self.phase = "idle"
+        self.last_outcome = "-"
+        self.running_k = None
+        self._panel_n = 0
+        self._pb_txt = []           # [(item id, last string)]
+        self.on_frame = None        # app hook: (img, dets, T_cam_cube) after every show()
+        self.on_progress = None     # calibration progress hook: (stage, done, total)
+        if self.cv_ui:
+            self.world.on_step = self._on_step
         os.makedirs(os.path.join(args.out, "frames"), exist_ok=True)
+
+    # ---------------- kinematics panel (GUI only) ----------------
+    def panel_lines(self):
+        w = self.world
+        q, qd = np.degrees(w.arm_q()), np.degrees(w.qd)
+        T = w.tcp_T()
+        R = T[:3, :3]
+        roll = math.degrees(math.atan2(R[2, 1], R[2, 2]))
+        pitch = math.degrees(math.atan2(-R[2, 0], math.hypot(R[2, 1], R[2, 2])))
+        yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+        g = math.degrees(w.p.getJointState(w.robot, w.grip_j[0])[0])
+        L = ["Phase: %s" % self.phase]
+        L += ["J%d %7.1f deg %7.1f d/s" % (i + 1, q[i], qd[i]) for i in range(5)]
+        L += ["TCP x%6.0f y%6.0f z%6.0f mm" % tuple(1000 * T[:3, 3]),
+              "TCP r%6.1f p%6.1f y%6.1f deg" % (roll, pitch, yaw),
+              "Gripper %.1f deg" % g, "Last: %s" % self.last_outcome]
+        return L
+
+    def _update_pb_panel(self, lines):
+        p = self.world.p
+        for i, s in enumerate(lines):
+            pos = [0.0, 0.55, 0.62 - 0.045 * i]
+            if i < len(self._pb_txt):
+                if self._pb_txt[i][1] == s:
+                    continue
+                p.addUserDebugText(s, pos, [1, 1, 0.2], 1.3, replaceItemUniqueId=self._pb_txt[i][0])
+                self._pb_txt[i] = (self._pb_txt[i][0], s)
+            else:
+                self._pb_txt.append((p.addUserDebugText(s, pos, [1, 1, 0.2], 1.3), s))
+
+    def _on_step(self):
+        self._panel_n += 1
+        if self._panel_n % 6:
+            return
+        lines = self.panel_lines()
+        self._update_pb_panel(lines)
+        if self._panel_n % 12 == 0:
+            self.refresh_cv(lines)
+            self.check_stop()
+
+    def refresh_cv(self, lines=None):
+        img = self.last_frame if self.last_frame is not None else np.zeros((480, 640, 3), np.uint8)
+        img = img.copy()
+        x0 = img.shape[1] - 250
+        y = 40
+        for s in (lines if lines is not None else self.panel_lines()):
+            cv2.rectangle(img, (x0 - 4, y - 13), (img.shape[1] - 2, y + 4), (0, 0, 0), -1)
+            cv2.putText(img, s, (x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 255, 200), 1)
+            y += 18
+        cv2.imshow(WIN, img)
+        cv2.waitKey(1)
+
+    def draw_zones(self):
+        """GUI: PICK (green) and PLACE (red) rectangles on the table + cross at the place target."""
+        p, z = self.world.p, self.table_z + 0.003
+
+        def rect(box, col, label):
+            (x0, x1), (y0, y1) = box["x_m"], box["y_m"]
+            pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            for i in range(4):
+                p.addUserDebugLine([*pts[i], z], [*pts[(i + 1) % 4], z], col, 3)
+            p.addUserDebugText(label, [(x0 + x1) / 2 - 0.05, y0 - 0.025, z + 0.005], col, 1.4)
+        rect(self.ws["cube_workspace_box"], [0, 0.9, 0], "PICK zone")
+        rect(self.ws["place_zone"], [1, 0, 0], "PLACE zone")
+        pt = self.ws["place_target"]
+        for d in ((0.02, 0), (0, 0.02)):
+            p.addUserDebugLine([pt["x_m"] - d[0], pt["y_m"] - d[1], z], [pt["x_m"] + d[0], pt["y_m"] + d[1], z],
+                               [1, 0, 0], 3)
 
     # ---------------- camera / detection ----------------
     def grab(self):
         self.n_renders += 1
-        return self.cam.render(self.world.p, gui=self.world.gui)
+        with self.world.camera_clean():
+            return self.cam.render(self.world.p, gui=self.world.gui)
 
     def detect(self, img):
         """-> {tag_id: corners 4x2 (OpenCV TL,TR,BR,BL)}"""
@@ -156,16 +240,17 @@ class Pipeline:
         cv2.putText(out, "SIMULATION ONLY - C270 model, PLACEHOLDER noise", (10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
         self.last_frame = out
-        if self.args.gui:
-            cv2.imshow(WIN, out)
-            cv2.waitKey(1)
+        if self.cv_ui:
+            self.refresh_cv()
             self.check_stop()
+        if self.on_frame is not None:
+            self.on_frame(img, dets, T_cam_cube)
         return out
 
     def check_stop(self):
         if not self.world.is_connected():
             raise UserStop("PyBullet window closed")
-        if self.args.gui and cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+        if self.cv_ui and cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
             raise UserStop("OpenCV window closed")
 
     def hold(self):
@@ -187,6 +272,54 @@ class Pipeline:
         except pb.error as e:
             if not is_disconnect_error(e):
                 raise
+
+    def calib_hash(self):
+        a = self.args
+        return calib_cache.config_hash(self.world.cfg_paths, a.seed, a.board_poses, a.calib_poses, S)
+
+    def _prog(self, stage, done, total):
+        if self.on_progress is not None:
+            self.on_progress(stage, done, total)
+
+    def apply_calib(self, d):
+        """Install a cached calibration (K, dist, T_base_cam, closed-gripper angle)."""
+        self.K, self.dist, self.T_base_cam = d["K"], d["dist"], d["T_base_cam"]
+        self.close_ang = d["close_ang"]
+        self.world.set_arm(self.q_ready)
+
+    def run_calibrations(self):
+        """Intrinsics + extrinsics A. With --gui they run in a hidden headless SimWorld (same configs / camera
+        model / seed) and K, dist, T_base_cam are copied here, so the GUI never shows teleporting props."""
+        if not self.args.gui:
+            use_cache = getattr(self.args, "use_calib_cache", False)
+            if use_cache:
+                d = calib_cache.load(self.calib_hash())
+                if d is not None:
+                    log("[calib] using cache %s (%s)" % (calib_cache.PATH, d["timestamp"]))
+                    self.apply_calib(d)
+                    return d["intr"], d["ext"]
+            intr = self.calibrate_intrinsics()
+            ext = self.calibrate_extrinsics()
+            self.world.set_arm(self.q_ready)
+            self.close_ang = self.closed_angle()
+            if use_cache:
+                calib_cache.save(intr, ext, self.close_ang, self.calib_hash())
+            return intr, ext
+        p = self.world.p
+        txt = p.addUserDebugText("Calibrating (hidden)...", [0.15, 0.0, 0.35], [1, 0.8, 0], 3.0)
+        hargs = argparse.Namespace(**vars(self.args))
+        hargs.gui = False
+        hp = Pipeline(hargs)                  # same seed -> same rng stream and camera noise stream as headless
+        intr = hp.calibrate_intrinsics()
+        ext = hp.calibrate_extrinsics()
+        hp.world.set_arm(hp.q_ready)
+        self.close_ang = hp.closed_angle()
+        self.K, self.dist, self.T_base_cam = hp.K, hp.dist, hp.T_base_cam
+        self.rng, self.cam.rng = hp.rng, hp.cam.rng       # continue the same random streams
+        self.n_renders += hp.n_renders
+        hp.world.close()
+        p.removeUserDebugItem(txt)
+        return intr, ext
 
     # ---------------- step 1: intrinsics ----------------
     def calibrate_intrinsics(self):
@@ -216,6 +349,7 @@ class Pipeline:
             ok, _ = cv2.findChessboardCorners(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), inner)
             if ok:
                 imgs.append(img)
+            self._prog("intrinsics", len(imgs), n)
         w.remove(body)
         K, dist, rms = calibrate_checkerboard(imgs, inner, sq)
         self.K, self.dist = K, dist.ravel()[:5]
@@ -286,6 +420,7 @@ class Pipeline:
             Ts_cam_tag.append(T_ct)
             q_prev = q
             self.show(imgs[0], ["extrinsics A: pose %d/%d" % (len(Ts_base_tcp), n)], dets[0])
+            self._prog("extrinsics", len(Ts_base_tcp), n)
         if len(Ts_base_tcp) < 3:
             raise RuntimeError("extrinsics A: only %d usable poses" % len(Ts_base_tcp))
         sol = calibrate_eye_to_hand(Ts_base_tcp, Ts_cam_tag)
@@ -366,14 +501,8 @@ class Pipeline:
         w = self.world
         w.move_joints(w.arm_q(), q_to, steps or S["move_steps"])
 
-    def gripper_to(self, ang, steps=15):
-        w = self.world
-        cur = w.p.getJointState(w.robot, w.grip_j[0])[0]
-        for t in range(1, steps + 1):
-            w.set_gripper(cur + (ang - cur) * t / steps)
-            w.p.stepSimulation()
-            if w.gui:
-                time.sleep(1 / 100)
+    def gripper_to(self, ang, steps=24):
+        self.world.move_gripper(ang, steps)
 
     def closed_angle(self):
         """Gripper joint angle at which the finger AABB gap equals the cube edge (visual only)."""
@@ -399,13 +528,31 @@ class Pipeline:
         return b
 
     # ---------------- one run ----------------
-    def run_one(self, k, close_ang):
+    def run_one(self, k, close_ang, pose=None, total=None, respawn=True):
+        """One pick-and-place. pose=(x, y, yaw_rad) is the cube pose source (None = random sampler)."""
+        self.running_k = k
+        try:
+            rec = self._run_one(k, close_ang, pose, total, respawn)
+        finally:
+            self.phase = "idle"
+        self.running_k = None
+        self.last_outcome = rec["outcome"]
+        return rec
+
+    def _run_one(self, k, close_ang, pose, total, respawn):
         w, a = self.world, self.args
         t0 = time.time()
-        x, y, yaw = self.sample_cube()
-        w.set_arm(S["park_q"])
+        x, y, yaw = self.sample_cube() if pose is None else pose
+        self.phase = "perceive"
+        if a.gui:
+            self.move(S["park_q"])
+        else:
+            w.set_arm(S["park_q"])
         w.set_gripper(0.0)
-        w.spawn_cube(x, y, yaw)
+        if respawn or w.cube is None:
+            w.spawn_cube(x, y, yaw)
+        else:
+            w.set_cube_pose(x, y, yaw)
         Tt = w.cube_pose_true()                                  # GROUND TRUTH: scoring only
         xt, yt, yawt = Tt[0, 3], Tt[1, 3], cube_yaw(Tt)
         rec = {"run": k, "true_x": xt, "true_y": yt, "true_yaw_deg": math.degrees(yawt),
@@ -414,7 +561,7 @@ class Pipeline:
                "place_err_mm": "", "place_yaw_err_deg": "", "upright": "", "outcome": ""}
         est, T_cc, info = self.perceive()
         rec["tags"] = ",".join(map(str, info["tag_ids"]))
-        head = ["run %02d/%d  true x=%.3f y=%.3f yaw=%.1f" % (k, a.runs, xt, yt, math.degrees(yawt))]
+        head = ["run %02d%s  true x=%.3f y=%.3f yaw=%.1f" % (k, "" if self.interactive else "/%d" % (total or a.runs), xt, yt, math.degrees(yawt))]
         if est is None:
             rec["outcome"] = "PERCEPTION_FAIL"
             self.show(info["img"], head + ["PERCEPTION_FAIL " + ",".join(info["reasons"])], info["dets"])
@@ -459,26 +606,32 @@ class Pipeline:
             self._save_frame(k)
             return rec
         c = chosen
+        rec["chosen_id"] = c.candidate_id
         rec.update(chosen_yaw_deg=math.degrees(c.grasp_yaw_rad), chosen_rank=chosen_rank + 1, total=c.score.total)
         log("  chosen %s (rank %d of %d feasible), total %.3f" % (c.candidate_id, chosen_rank + 1, nfeas, c.score.total))
         self.show(info["img"], cand_lines + ["chosen %s yaw %.0f deg (%d feasible)" % (
             c.candidate_id, math.degrees(c.grasp_yaw_rad), nfeas)], info["dets"], T_cc)
 
         # ---- execute ----
+        self.phase = "pregrasp"
         self.move(self.q_ready)
         cube0 = w.cube_pose_true()[:3, 3].copy()
         self.move(c.q_pregrasp)
+        self.phase = "grasp"
         self.move(c.q_grasp)
         moved_pre = float(np.linalg.norm(w.cube_pose_true()[:2, 3] - cube0[:2])) * 1000
         self.gripper_to(close_ang)
         T_tcp_cube = Tinv(w.tcp_T()) @ w.cube_pose_true()       # TRUE offset (scoring)
         rec["grasp_offset_mm"] = float(np.linalg.norm(T_tcp_cube[:3, 3]) * 1000)
         w.attach_cube()
+        self.phase = "lift"
         self.move(c.q_lift)
+        self.phase = "place"
         self.move(chosen_plan["q_pre"])
         self.move(chosen_plan["q_place"])
         w.detach_cube()
         self.gripper_to(0.0)
+        self.phase = "retreat"
         self.move(chosen_plan["q_pre"])
         self.move(self.q_ready)
         self.move(S["park_q"], 60)
@@ -501,8 +654,52 @@ class Pipeline:
         self._save_frame(k)
         if a.gui:       # show the placed cube in the live window too
             self.show(self.grab(), [rec["outcome"] + " - cube placed, place err %.1f mm" % perr])
-            cv2.waitKey(300)
+            if self.cv_ui:
+                cv2.waitKey(300)
         return rec
+
+    def interactive_loop(self, recs):
+        """GUI sliders (cube x, y, yaw) + 'Pick & Place' button. Idle: cube follows sliders. Press: full run."""
+        w, p = self.world, self.world.p
+        box, m = self.ws["cube_workspace_box"], S["cube_margin_m"]
+        bx, by = (box["x_m"][0] + m, box["x_m"][1] - m), (box["y_m"][0] + m, box["y_m"][1] - m)
+        sx = p.addUserDebugParameter("cube x (m)", bx[0], bx[1], 0.5 * (bx[0] + bx[1]))
+        sy = p.addUserDebugParameter("cube y (m)", by[0], by[1], 0.5 * (by[0] + by[1]))
+        sw = p.addUserDebugParameter("cube yaw (deg)", -180, 180, 0)
+        btn = p.addUserDebugParameter("Pick & Place", 1, 0, 0)
+
+        def read():
+            return tuple(float(p.readUserDebugParameter(i)) for i in (sx, sy, sw))
+        vals = read()
+        w.spawn_cube(vals[0], vals[1], math.radians(vals[2]))
+        self.move(S["park_q"])
+        last_btn, applied, k, t_img = p.readUserDebugParameter(btn), vals, 0, 0.0
+        auto = int(os.environ.get("XARM_SIM_TEST_AUTOPRESS", "0") or 0)      # test hook: N automatic presses, then exit
+        log("Interactive: set cube with the sliders, press 'Pick & Place'. q / Esc / close window = quit.")
+        while True:
+            self.check_stop()
+            cur, b = read(), p.readUserDebugParameter(btn)
+            if b != last_btn or auto > 0:
+                last_btn = b
+                if auto > 0:
+                    auto -= 1
+                k += 1
+                log("\n--- run %d (sliders x=%.3f y=%.3f yaw=%.0f deg) ---" % (k, cur[0], cur[1], cur[2]))
+                recs.append(self.run_one(k, self.close_ang, (cur[0], cur[1], math.radians(cur[2])), respawn=False))
+                applied = read()
+                self.show(self.grab(), ["%s - press 'Pick & Place' again, or move sliders" % recs[-1]["outcome"]])
+                t_img = time.time()
+                continue
+            if cur != applied:
+                w.set_cube_pose(cur[0], cur[1], math.radians(cur[2]), settle=0)
+                applied = cur
+            if "XARM_SIM_TEST_AUTOPRESS" in os.environ and auto == 0 and k > 0:
+                return
+            if time.time() - t_img > 0.3:
+                self.show(self.grab(), ["IDLE - set cube with sliders, press 'Pick & Place'"])
+                t_img = time.time()
+            if cv2.waitKey(15) & 0xFF in (ord("q"), 27):
+                raise UserStop("quit key")
 
     def plan_place(self, c, T_est, pt, eyaw):
         """Commanded place poses from the ESTIMATED grasp geometry; IK-check pregrasp + place."""
@@ -556,9 +753,10 @@ def write_outputs(args, intr, ext, recs, runtime, partial=False, aborted=None):
                  "success rate denominator = completed runs).\n" % (
                      len(recs), aborted["run"] if aborted else "-"))
     L.append("**%s**\n" % BANNER)
-    L.append("Command: `python -I scripts/sim_demo.py --runs %d --seed %d` (calib poses %d, board poses %d). "
+    L.append("Command: `python -I scripts/sim_demo.py %s --seed %d` (calib poses %d, board poses %d). "
              "Runtime %.0f s. Ground truth is used for scoring only.\n" % (
-                 args.runs, args.seed, args.calib_poses, args.board_poses, runtime))
+                 "--gui (interactive sliders)" if (args.gui and not getattr(args, "auto", False))
+                 else "--runs %d" % args.runs, args.seed, args.calib_poses, args.board_poses, runtime))
     L.append("Honesty labels: SIMULATION ONLY; C270 noise/blur/distortion = PLACEHOLDER (tuned by eye); "
              "grasp = kinematic attach, no contact physics; gripper = xArm Gripper stand-in (real gripper unidentified); "
              "IK = PyBullet, no collision checking in planning; no MoveIt, no real robot, no real camera. "
@@ -620,12 +818,20 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--calib-poses", type=int, default=20, help="extrinsics A poses")
     ap.add_argument("--board-poses", type=int, default=20, help="checkerboard views")
-    ap.add_argument("--out", default=os.path.join(ROOT, "results", "sim_demo"))
+    ap.add_argument("--auto", action="store_true",
+                    help="with --gui: run N random runs (old behaviour) instead of the interactive sliders mode")
+    ap.add_argument("--use-calib-cache", action="store_true",
+                    help="headless: load/save results/sim_calib/sim_calib.json instead of always calibrating "
+                         "(default off: the scored demo calibrates for real)")
+    ap.add_argument("--out", default=None, help="default results/sim_demo (results/sim_interactive for interactive)")
     ap.add_argument("--hold", action=argparse.BooleanOptionalAction, default=None,
                     help="keep windows open after the last run (default: on with --gui)")
     args = ap.parse_args(argv)
+    interactive = args.gui and not args.auto
+    if args.out is None:
+        args.out = os.path.join(ROOT, "results", "sim_interactive" if interactive else "sim_demo")
     if args.hold is None:
-        args.hold = args.gui
+        args.hold = args.gui and not interactive
     t0 = time.time()
     log("=" * 100 + "\n" + BANNER + "\n" + "=" * 100)
     P = Pipeline(args)
@@ -635,26 +841,33 @@ def main(argv=None):
     inject = int(os.environ.get("XARM_SIM_TEST_DISCONNECT_AFTER_RUN", "0") or 0)   # test hook
     try:
         try:
-            intr = P.calibrate_intrinsics()
-            ext = P.calibrate_extrinsics()
-            P.world.set_arm(P.q_ready)
-            close_ang = P.closed_angle()
-            for k in range(1, args.runs + 1):
-                aborted = {"run": k, "outcome": "ABORTED_BY_USER"}
-                P.check_stop()
-                log("\n--- run %d/%d ---" % (k, args.runs))
-                recs.append(P.run_one(k, close_ang))
-                aborted = None
-                if k == inject:
-                    P.world.p.disconnect()      # simulate the user closing the PyBullet window
+            intr, ext = P.run_calibrations()
+            close_ang = P.close_ang
+            if args.gui:
+                P.draw_zones()
+            if interactive:
+                P.interactive_loop(recs)
+            else:
+                for k in range(1, args.runs + 1):
+                    aborted = {"run": k, "outcome": "ABORTED_BY_USER"}
+                    P.check_stop()
+                    log("\n--- run %d/%d ---" % (k, args.runs))
+                    recs.append(P.run_one(k, close_ang))
+                    aborted = None
+                    if k == inject:
+                        P.world.p.disconnect()      # simulate the user closing the PyBullet window
         except (UserStop, pb.error) as e:
             if isinstance(e, pb.error) and not is_disconnect_error(e):
                 raise
             stopped = True
+            if interactive and P.running_k:
+                aborted = {"run": P.running_k, "outcome": "ABORTED_BY_USER"}
+        if interactive and not stopped:
+            stopped = True      # test-hook exit: still write partial-style outputs
         if stopped:
-            if intr is not None and ext is not None:
+            if intr is not None and ext is not None and (recs or not interactive):
                 write_outputs(args, intr, ext, recs, time.time() - t0, partial=True, aborted=aborted)
-            log("\nStopped by user - partial results saved (%d completed runs): %s" % (
+            log("\nStopped - partial results saved (%d completed runs): %s" % (
                 len(recs), os.path.join(args.out, "summary_partial.md")))
         else:
             n_ok = write_outputs(args, intr, ext, recs, time.time() - t0)

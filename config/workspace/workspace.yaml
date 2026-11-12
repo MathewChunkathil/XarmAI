@@ -5,12 +5,15 @@ table_top_z_m: 0.0                # m. PLACEHOLDER: unmeasured
 table_box:                        # PLACEHOLDER: unmeasured
   size_xyz_m: [0.80, 0.80, 0.02]  # m
   center_xyz_m: [0.35, 0.0, -0.01]  # m, link_base
-cube_workspace_box:               # PLACEHOLDER: unmeasured; cube centre must lie inside
+cube_workspace_box:               # PICK zone. PLACEHOLDER: unmeasured; cube centre must lie inside
   x_m: [0.25, 0.50]
-  y_m: [-0.20, 0.20]
-place_target:                     # PLACEHOLDER: unmeasured
-  x_m: 0.30
-  y_m: -0.20
+  y_m: [-0.10, 0.20]
+place_zone:                       # PLACE zone (does NOT overlap the pick zone). PLACEHOLDER: unmeasured
+  x_m: [0.24, 0.40]
+  y_m: [-0.36, -0.22]
+place_target:                     # PLACEHOLDER: unmeasured. Centre of place_zone
+  x_m: 0.32
+  y_m: -0.29
   yaw_rad: 0.0
 ready_joint_state_rad: [0.0, -0.5, -0.5, 0.0, 0.0]   # 5 joints J1..J5. PLACEHOLDER: unmeasured
 forbidden_zones: []               # list of {x_m:[min,max], y_m:[min,max], z_m:[min,max]}

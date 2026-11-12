@@ -5,6 +5,7 @@ World frame == robot base frame (link_base at origin). Table top z = workspace.y
 table_top_z_m (default 0.0 => base sits on the table top).
 """
 import math
+import contextlib
 import os
 import time
 import warnings
@@ -97,21 +98,38 @@ def _tag_tile(tag_id, tile_px, tag_frac):
 
 
 class SimWorld:
-    def __init__(self, gui=False, cfg_paths=None):
+    def __init__(self, gui=False, cfg_paths=None, gui_panel=False, clean=False, window=(1200, 900)):
+        """clean=True (sim_app.py): calm 3D view only - no debug panes/sliders, shadows on, nicer colours."""
         self.gui = gui
+        self.clean = bool(clean and gui)
+        self.speed = 1.0             # GUI pacing factor (1 = real time at 240 Hz)
+        self._t_next = 0.0
+        self.on_step = None          # optional per-step callback (GUI kinematics panel)
+        self.qd = np.zeros(5)        # commanded joint velocity [rad/s] (finite diff per step)
+        self.dt_step = 1 / 240
         self.cfg_paths = dict(DEFAULT_CFG)
         if cfg_paths:
             self.cfg_paths.update(cfg_paths)
         os.makedirs(CACHE, exist_ok=True)
         self.cube_cfg = _yaml(self.cfg_paths["cube"])
         self.edge = float(self.cube_cfg["edge_m"])
-        self.p = bullet_client.BulletClient(pb.GUI if gui else pb.DIRECT)
+        if self.clean:
+            self.p = bullet_client.BulletClient(pb.GUI, options="--width=%d --height=%d" % tuple(window))
+        else:
+            self.p = bullet_client.BulletClient(pb.GUI if gui else pb.DIRECT)
         p = self.p
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(1 / 240)
-        if gui:
-            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+        if self.clean:
+            for k in (p.COV_ENABLE_GUI, p.COV_ENABLE_RGB_BUFFER_PREVIEW, p.COV_ENABLE_DEPTH_BUFFER_PREVIEW,
+                      p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW, p.COV_ENABLE_MOUSE_PICKING):
+                p.configureDebugVisualizer(k, 0)
+            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
+            p.configureDebugVisualizer(rgbBackground=[0.13, 0.15, 0.19], lightPosition=[2.5, -2.0, 4.0])
+            p.resetDebugVisualizerCamera(1.05, 10, -34, [0.30, -0.08, 0.08])
+        elif gui:
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1 if gui_panel else 0)
             p.resetDebugVisualizerCamera(1.1, 140, -35, [0.3, 0, 0.1])
 
         # table: top at table_top_z; robot base at world origin sits on it
@@ -127,14 +145,19 @@ class SimWorld:
             warnings.warn("workspace.yaml missing: table_top_z=0.0 PLACEHOLDER")
             self.table_top_z, size, cen, self.workspace = 0.0, [0.8, 0.8, 0.02], [0.35, 0, -0.01], {}
         floor_z = self.table_top_z - 0.75
-        self.plane = p.createMultiBody(
-            0, p.createCollisionShape(pb.GEOM_PLANE),
-            p.createVisualShape(pb.GEOM_PLANE, rgbaColor=[0.55, 0.55, 0.55, 1]), [0, 0, floor_z])
+        if self.clean:      # GL renderer paints a checker texture on plane visuals: use a big flat box instead
+            fvs = p.createVisualShape(pb.GEOM_BOX, halfExtents=[20, 20, 0.01], rgbaColor=[0.25, 0.28, 0.34, 1])
+            self.plane = p.createMultiBody(0, p.createCollisionShape(pb.GEOM_PLANE), fvs, [0, 0, floor_z - 0.01])
+        else:
+            self.plane = p.createMultiBody(
+                0, p.createCollisionShape(pb.GEOM_PLANE),
+                p.createVisualShape(pb.GEOM_PLANE, rgbaColor=[0.55, 0.55, 0.55, 1]), [0, 0, floor_z])
         half = [size[0] / 2, size[1] / 2, (self.table_top_z - floor_z) / 2]
         tpos = [cen[0], cen[1], self.table_top_z - half[2]]
         self.table = p.createMultiBody(
             0, p.createCollisionShape(pb.GEOM_BOX, halfExtents=half),
-            p.createVisualShape(pb.GEOM_BOX, halfExtents=half, rgbaColor=[0.45, 0.33, 0.22, 1]), tpos)
+            p.createVisualShape(pb.GEOM_BOX, halfExtents=half, rgbaColor=[0.78, 0.68, 0.54, 1] if self.clean
+                                else [0.45, 0.33, 0.22, 1]), tpos)
         p.changeDynamics(self.table, -1, lateralFriction=0.8)
 
         # robot (indices looked up by name)
@@ -173,18 +196,40 @@ class SimWorld:
         fwd = (tgt - eye) / np.linalg.norm(tgt - eye)
         h = eye[2] - self.table_top_z
         px, py = eye[0] + 0.07, eye[1]
-        dark = [0.1, 0.1, 0.1, 1]
-        pole = p.createMultiBody(0, -1, p.createVisualShape(pb.GEOM_CYLINDER, radius=0.012, length=h, rgbaColor=dark),
+        alu = [0.75, 0.77, 0.8, 1]
+        pole = p.createMultiBody(0, -1, p.createVisualShape(pb.GEOM_CYLINDER, radius=0.008, length=h, rgbaColor=alu),
                                  [px, py, self.table_top_z + h / 2])
-        base = p.createMultiBody(0, -1, p.createVisualShape(pb.GEOM_BOX, halfExtents=[0.06, 0.06, 0.008],
-                                                            rgbaColor=dark), [px, py, self.table_top_z + 0.008])
+        base = p.createMultiBody(0, -1, p.createVisualShape(pb.GEOM_BOX, halfExtents=[0.04, 0.04, 0.005],
+                                                            rgbaColor=[0.62, 0.64, 0.67, 1]),
+                                 [px, py, self.table_top_z + 0.005])
         x = np.cross(fwd, [0, 0, 1.0]); x /= np.linalg.norm(x)
         y = np.cross(fwd, x)
         R = np.stack([fwd, x, y], 1)  # box x axis -> viewing direction
-        body = p.createMultiBody(0, -1, p.createVisualShape(pb.GEOM_BOX, halfExtents=[0.02, 0.035, 0.012],
-                                                            rgbaColor=[0.05, 0.05, 0.05, 1]),
-                                 (eye - 0.03 * fwd).tolist(), quat_from_R(R))
+        # C270-sized body (25 deep x 70 wide x 30 tall mm), sits just behind the optical centre
+        body = p.createMultiBody(0, -1, p.createVisualShape(pb.GEOM_BOX, halfExtents=[0.0125, 0.035, 0.015],
+                                                            rgbaColor=[0.22, 0.23, 0.25, 1]),
+                                 (eye - 0.02 * fwd).tolist(), quat_from_R(R))
         self.stand = [pole, base, body]
+
+    @contextlib.contextmanager
+    def camera_clean(self):
+        """Hide the (visual-only) stand and GL shadows while the C270 sim camera renders."""
+        if not self.gui or not getattr(self, "stand", None):
+            yield
+            return
+        p = self.p
+        cols = [p.getVisualShapeData(b)[0][7] for b in self.stand]
+        for b, c in zip(self.stand, cols):
+            p.changeVisualShape(b, -1, rgbaColor=[c[0], c[1], c[2], 0.0])
+        if self.clean:
+            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
+        try:
+            yield
+        finally:
+            for b, c in zip(self.stand, cols):
+                p.changeVisualShape(b, -1, rgbaColor=list(c))
+            if self.clean:
+                p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
 
     # ---------------- textured bodies ----------------
     def _textured_quad(self, img, width, height, name):
@@ -324,13 +369,56 @@ class SimWorld:
         _, q, pe, re = best
         return (pe < 1e-3 and re < math.radians(2.0)), q, pe, re
 
-    def move_joints(self, q_from, q_to, steps=40):
+    @staticmethod
+    def quintic(t):
+        """Minimum-jerk time scaling s(t), t in [0,1]."""
+        return 10 * t ** 3 - 15 * t ** 4 + 6 * t ** 5
+
+    def _tick(self):
+        self.p.stepSimulation()
+        if self.on_step is not None:
+            self.on_step()
+        if self.gui:        # pace to dt/speed (deadline based, so on_step cost is absorbed)
+            now = time.perf_counter()
+            if self._t_next < now - 0.1:
+                self._t_next = now
+            self._t_next += self.dt_step / max(self.speed, 0.05)
+            sl = self._t_next - time.perf_counter()
+            if sl > 0:
+                time.sleep(sl)
+
+    def move_joints(self, q_from, q_to, steps=40, max_step_rad=0.008):
+        """Smooth quintic joint move (kinematic, teleport per step). steps = minimum step count; scaled up
+        with the largest joint delta so the speed stays bounded."""
         a, b = np.array(q_from, float), np.array(q_to, float)
+        if float(np.max(np.abs(b - a))) < 1e-6:
+            return
+        n = max(int(steps), int(math.ceil(float(np.max(np.abs(b - a))) / max_step_rad)))
+        prev = a.copy()
+        for t in range(1, n + 1):
+            q = a + self.quintic(t / n) * (b - a)
+            self.qd = (q - prev) / self.dt_step
+            prev = q
+            self.set_arm(q)
+            self._tick()
+        self.qd = np.zeros(5)
+
+    def move_gripper(self, ang, steps=24):
+        """Eased gripper open/close."""
+        cur = self.p.getJointState(self.robot, self.grip_j[0])[0]
         for t in range(1, steps + 1):
-            self.set_arm(a + t / steps * (b - a))
-            self.p.stepSimulation()
-            if self.gui:
-                time.sleep(1 / 120)
+            self.set_gripper(cur + (ang - cur) * self.quintic(t / steps))
+            self._tick()
+
+    def set_cube_pose(self, x, y, yaw, settle=240):
+        """Teleport the existing cube to (x, y, yaw) on the table and let it settle."""
+        p = self.p
+        self.detach_cube()
+        p.resetBasePositionAndOrientation(self.cube, [x, y, self.table_top_z + self.edge / 2 + 0.002],
+                                          p.getQuaternionFromEuler([0, 0, yaw]))
+        p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
+        for _ in range(settle):
+            p.stepSimulation()
 
     # ---------------- kinematic attach (NOT a physical grasp) ----------------
     def attach_cube(self):
@@ -410,6 +498,35 @@ class SimWorld:
         if body == self.cube:
             self.cube = None
         self.p.removeBody(body)
+
+    # ---------------- visual-only zone overlays (sim_app) ----------------
+    def add_zone_overlays(self):
+        """Thin flat semi-transparent boxes on the table (no collision): green PICK, orange PLACE, target disc."""
+        p, ws = self.p, self.workspace
+        if not ws:
+            return []
+        z0 = self.table_top_z
+        bodies = []
+
+        def box(cx, cy, hx, hy, hz, zc, rgba):
+            vs = p.createVisualShape(pb.GEOM_BOX, halfExtents=[hx, hy, hz], rgbaColor=rgba)
+            bodies.append(p.createMultiBody(0, -1, vs, [cx, cy, zc]))
+
+        def zone(b, rgb):
+            (x0, x1), (y0, y1) = b["x_m"], b["y_m"]
+            cx, cy, hx, hy = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2
+            box(cx, cy, hx, hy, 0.0005, z0 + 0.0005, [*rgb, 0.30])
+            e = 0.003      # border strips
+            box(cx, y0, hx, e / 2, 0.001, z0 + 0.001, [*rgb, 0.9])
+            box(cx, y1, hx, e / 2, 0.001, z0 + 0.001, [*rgb, 0.9])
+            box(x0, cy, e / 2, hy, 0.001, z0 + 0.001, [*rgb, 0.9])
+            box(x1, cy, e / 2, hy, 0.001, z0 + 0.001, [*rgb, 0.9])
+        zone(ws["cube_workspace_box"], (0.20, 0.80, 0.40))
+        zone(ws["place_zone"], (0.98, 0.55, 0.15))
+        pt = ws["place_target"]
+        vs = p.createVisualShape(pb.GEOM_CYLINDER, radius=0.012, length=0.002, rgbaColor=[1.0, 0.35, 0.10, 0.9])
+        bodies.append(p.createMultiBody(0, -1, vs, [pt["x_m"], pt["y_m"], z0 + 0.0015]))
+        return bodies
 
     def is_connected(self):
         try:
