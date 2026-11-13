@@ -16,6 +16,17 @@ DEFAULT_CFG = {
     "lm_max_iter": 20,          # solvePnPRefineLM iterations
     "lm_eps": 1e-8,
     "min_depth_m": 1e-3,        # cube centre must be at least this far in front of camera
+    # --- single-tag quality gate (a lone tag has a depth / tilt ambiguity; measured outliers up to 46 mm / 30 deg).
+    # Thresholds from scripts/measure_edge_poses.py (simulated C270, PLACEHOLDER noise): good single-tag solutions have
+    # rms <= 0.58 px, side >= 58 px, border >= 3.6 px, tilt <= 0.9 deg, |z error| <= 3.9 mm.
+    "single_max_rms_px": 0.7,
+    "single_min_side_px": 40.0,       # mean tag side length in the image
+    "single_border_px": 3.0,          # tag corner closer than this to the image border -> reject
+    "single_max_tilt_deg": 6.0,       # resting-cube constraint: most vertical cube axis vs world z
+    "single_max_z_err_m": 0.006,      # resting-cube constraint: centre z vs table / stack level (needs T_base_cam)
+    # optional context, passed by the caller (the checks that need it are skipped when absent):
+    "image_size": None,               # (width, height) px
+    "T_base_cam": None, "table_z": None, "edge": None, "max_level": 0,
 }
 
 
@@ -97,7 +108,37 @@ def estimate_cube_pose(detections: Sequence[Tuple[int, np.ndarray]], K, dist, mo
         res.invalid_reason = "HIGH_REPROJ"
     else:
         res.valid, res.invalid_reason = True, ""
+    if res.valid and len(ids) == 1:
+        why = single_tag_gate(res, img, c)
+        if why:
+            res.valid, res.invalid_reason = False, why
     return res
+
+
+def single_tag_gate(res: CubePoseResult, img_pts, c) -> str:
+    """Extra checks for a solution from ONE tag. -> "" if it passes, else the invalid_reason."""
+    if res.rms_px > float(c["single_max_rms_px"]):
+        return "SINGLE_TAG_RMS"
+    pts = np.asarray(img_pts, float).reshape(4, 2)
+    side = float(np.mean([np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)]))
+    if side < float(c["single_min_side_px"]):
+        return "SINGLE_TAG_SMALL"
+    if c.get("image_size") is not None:
+        w, h = c["image_size"]
+        m = float(c["single_border_px"])
+        if pts[:, 0].min() < m or pts[:, 1].min() < m or pts[:, 0].max() > w - m or pts[:, 1].max() > h - m:
+            return "SINGLE_TAG_BORDER"
+    if c.get("T_base_cam") is not None:
+        T = np.asarray(c["T_base_cam"], float) @ res.T_cam_cube
+        tilt = float(np.degrees(np.arccos(min(1.0, float(np.max(np.abs(T[2, :3])))))))
+        if tilt > float(c["single_max_tilt_deg"]):
+            return "SINGLE_TAG_NOT_RESTING"
+        if c.get("table_z") is not None and c.get("edge") is not None:
+            e, z0 = float(c["edge"]), float(c["table_z"]) + float(c["edge"]) / 2.0
+            n = float(np.clip(round((T[2, 3] - z0) / e), 0, int(c.get("max_level") or 0)))
+            if abs(T[2, 3] - (z0 + n * e)) > float(c["single_max_z_err_m"]):
+                return "SINGLE_TAG_NOT_RESTING"
+    return ""
 
 
 def fold_yaw(yaw: float) -> float:
@@ -120,19 +161,24 @@ def cube_yaw(T_base_cube: np.ndarray) -> float:
 
 
 def to_base(T_base_cam, T_cam_cube, table_z: Optional[float] = None,
-            edge: Optional[float] = None) -> np.ndarray:
+            edge: Optional[float] = None, max_level: int = 0) -> np.ndarray:
     """T_base_cube = T_base_cam @ T_cam_cube, optionally constrained to a table plane.
 
     With table_z and edge given: z = table_z + edge/2; roll/pitch snapped so the
     nearest cube face is down (cube upright); yaw recomputed from the measured
     orientation and folded to [-pi/4, pi/4).
+    max_level > 0 (stacks): z is snapped to the nearest stack level table_z + edge/2 + n*edge, n = 0..max_level
+    (a cube can only rest on the table or on another cube). max_level = 0 is the legacy table-only behaviour.
     """
     T = np.asarray(T_base_cam) @ np.asarray(T_cam_cube)
     if table_z is None or edge is None:
         return T
     out = np.eye(4)
     out[:3, :3] = _rz(cube_yaw(T))
-    out[:3, 3] = [T[0, 3], T[1, 3], table_z + edge / 2.0]
+    z = table_z + edge / 2.0
+    if max_level > 0:
+        z += edge * float(np.clip(round((T[2, 3] - z) / edge), 0, max_level))
+    out[:3, 3] = [T[0, 3], T[1, 3], z]
     return out
 
 
@@ -147,3 +193,11 @@ def median_pose(Ts: Sequence[np.ndarray]) -> np.ndarray:
     out = np.eye(4)
     out[:3, :3], out[:3, 3] = R, t
     return out
+
+
+def estimate_cubes(detections, K, dist, cube_set, cfg: Optional[dict] = None):
+    """All identified cubes at once: group tags by cube ID set, run estimate_cube_pose per cube.
+    -> {cube number: CubePoseResult} for every cube with at least one detected tag."""
+    from .cube_model import identify_cubes
+    groups = identify_cubes(detections, cube_set)
+    return {n: estimate_cube_pose(d, K, dist, cube_set[n], cfg) for n, d in groups.items()}

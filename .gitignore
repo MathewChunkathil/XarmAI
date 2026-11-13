@@ -16,3 +16,8 @@ sim/_cache/
 results/sim_app/frames/
 
 results/kin_logs/
+
+# voice model cache (downloaded on first use)
+models/whisper/
+results/reports/
+results/sim_conveyor/frames/

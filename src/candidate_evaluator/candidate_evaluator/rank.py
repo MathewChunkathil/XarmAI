@@ -94,7 +94,7 @@ def rank(candidates: List[GraspCandidate], ranking_cfg: dict, profile: Optional[
 
 
 def format_table(candidates: List[GraspCandidate]) -> str:
-    hdr = (f"{'id':<14}{'yaw_deg':>8} {'status':<10}{'reason':<17}"
+    hdr = (f"{'id':<14}{'yaw_deg':>8} {'status':<10}{'reason':<20}"
            f"{'motion':>7}{'clear':>7}{'kinem':>7}{'grasp':>7}{'time':>7}{'total':>8}")
     lines = [hdr, "-" * len(hdr)]
     for c in sorted(candidates, key=lambda c: c.candidate_id):
@@ -103,5 +103,5 @@ def format_table(candidates: List[GraspCandidate]) -> str:
         terms = "".join(f"{v:7.3f}" for v in s.normalised) if feasible else " " * 35
         tot = f"{s.total:8.3f}" if feasible else " " * 8
         lines.append(f"{c.candidate_id:<14}{math.degrees(c.grasp_yaw_rad):8.1f} "
-                     f"{STATUS_NAMES.get(c.status, str(c.status)):<10}{c.rejection_reason:<17}{terms}{tot}")
+                     f"{STATUS_NAMES.get(c.status, str(c.status)):<10}{c.rejection_reason:<20}{terms}{tot}")
     return "\n".join(lines)

@@ -133,3 +133,15 @@ specified pick-and-place in simulation.
 
 Only after this baseline works should perception-driven autonomous
 grasping be added.
+
+## 7. Simulation app quick start
+`.venv\Scripts\python -I scripts\sim_app.py` opens the PyBullet 3D view + Dear PyGui control panel. Type multi-cube commands
+(`place the green cube in zone 1 and stack red on green`) or hold the **Hold to talk** button / SPACE (offline faster-whisper, no LLM;
+model downloaded on first start into `models/whisper/`). `.venv\Scripts\python -I scripts\make_report.py --last N` writes the PDF report.
+Details: `sim/README.md`.
+
+### Conveyor (moving-cube pick, simulation only)
+The sim app has a Conveyor panel and understands `start the conveyor`, `set conveyor speed to 4 cm per second`, `feed the red cube onto the conveyor`,
+`pick the green cube from the belt and place it in zone 2`. The robot estimates the cube velocity from camera frames, plans an intercept and grasps the
+moving cube (`cartesian-tracking` segments). Headless: `scripts\sim_demo.py --conveyor --command "..."` or `--conveyor-runs N --conveyor-speed 0.02,0.04,0.06`.
+All belt numbers are PLACEHOLDER (no real belt exists). Details: `sim/README.md`.

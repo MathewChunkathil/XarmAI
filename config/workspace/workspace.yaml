@@ -18,3 +18,60 @@ place_target:                     # PLACEHOLDER: unmeasured. Centre of place_zon
 ready_joint_state_rad: [0.0, -0.5, -0.5, 0.0, 0.0]   # 5 joints J1..J5. PLACEHOLDER: unmeasured
 forbidden_zones: []               # list of {x_m:[min,max], y_m:[min,max], z_m:[min,max]}
 place_tol_m: 0.010                # m, place success tolerance (cube centre xy vs place_target). PLACEHOLDER: tune with recorded data
+
+# ---- Multi-cube layout (added for the 3-cube / zone demo). ALL values PLACEHOLDER: unmeasured, sim only. ----
+# Place zones 1..3. Zone 1 == the legacy place_zone / place_target above (old keys keep working).
+# Zones 2 and 3 are visual + reach tested in sim (headless IK), NOT measured on a real table. They do not
+# overlap the pick zone or each other. Slots inside a zone are spaced place_slot_spacing_m apart.
+place_slot_spacing_m: 0.07        # m, min centre spacing of two cubes placed in the same zone. PLACEHOLDER
+stack_release_gap_m: 0.002        # m, extra height above the support when releasing a stacked cube. PLACEHOLDER
+max_stack_height: 3               # cubes
+place_zones:
+  - number: 1
+    name: zone 1
+    x_m: [0.24, 0.40]
+    y_m: [-0.36, -0.22]
+    target: {x_m: 0.32, y_m: -0.29, yaw_rad: 0.0}
+    color_rgb: [250, 140, 40]
+  - number: 2
+    name: zone 2
+    x_m: [0.20, 0.50]
+    y_m: [0.25, 0.39]
+    target: {x_m: 0.35, y_m: 0.315, yaw_rad: 0.0}
+    color_rgb: [90, 200, 240]
+  - number: 3
+    name: zone 3
+    x_m: [0.42, 0.64]
+    y_m: [-0.36, -0.22]
+    target: {x_m: 0.53, y_m: -0.29, yaw_rad: 0.0}
+    color_rgb: [190, 120, 250]
+
+# ---- Conveyor belt (moving-cube pick). SIMULATION ONLY. ALL values PLACEHOLDER: unmeasured, no real belt exists. ----
+# Straight lane along world x, flowing toward the robot (direction [-1, 0]), at y = -0.17 between the pick zone
+# (y >= -0.10) and place zone 1 / 3 (y <= -0.22): it overlaps NO other zone, so static cubes never sit in the lane.
+# Inside the C270 view with margin (checked by projecting the lane corners + cube top with the true camera, see
+# README "Conveyor"). s = distance along the flow from the feed end (s = 0) to the end stop (s = length_m).
+# The robot does NOT read speed_m_s: it estimates cube velocity from camera frames. speed_m_s is only the belt
+# default (app slider / --conveyor-speed set the real one) and the ground truth the estimate is scored against.
+conveyor:
+  lane_box:                       # axis-aligned lane (belt top surface), world metres
+    x_m: [0.18, 0.47]
+    y_m: [-0.205, -0.135]
+  direction: [-1.0, 0.0]          # unit vector, axis aligned: cubes move toward -x (feed end at x = 0.47)
+  speed_m_s: 0.03                 # default belt speed. PLACEHOLDER
+  max_speed_m_s: 0.06             # slider / parser limit. PLACEHOLDER
+  belt_height_m: 0.016            # belt top above the table. PLACEHOLDER
+  end_stop_thickness_m: 0.012     # fixed block behind s = length_m (cubes stop against it)
+  cleat_pitch_m: 0.045            # visual-only cross stripes (stepped with the belt so motion is visible)
+  feed_s_m: 0.04                  # centre of a fed cube, distance from the feed end
+  feed_cross_m: 0.012             # fed cube lateral offset: uniform +-this about the lane centre line
+  pick_window_s_m: [0.07, 0.215]  # the grasp contact (end of the tracking descent) must lie in this s range
+  park_joint_state_rad: [-0.5, -0.5, -0.5, 0.0, 0.0]   # belt-side wait pose: TCP (0.45, -0.24, 0.34) m just above the lane, ABOVE the C270 field of view (0 arm pixels in the true camera, checked)
+  # --- vision tracking + intercept planning (PLACEHOLDER demo parameters) ---
+  track_frames: 5                 # camera frames used for the velocity fit (>= 3)
+  track_dt_s: 0.10                # sim time between the frames (fit span = (frames-1)*dt = 0.4 s)
+  stationary_speed_m_s: 0.003     # |v_est| below max(this, 2 sigma_v) -> treated as a stationary cube
+  hover_s: 0.20                   # hover-track time above the predicted point (belt velocity ramps in)
+  pregrasp_above_m: 0.05          # TCP height above the grasp point while hover-tracking (open finger tips stay 3 cm above the cube top)
+  track_descend_speed_m_s: 0.20   # peak TCP speed of the tracking descent (time raised when joint limits bind)
+  stop_margin_m: 0.004            # cube must stay this far from the end stop until the grasp is closed

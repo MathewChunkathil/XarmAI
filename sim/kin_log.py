@@ -215,6 +215,9 @@ class RunLog:
     # ------------------------------------------------------------ writing
     def stem(self, meta):
         rec = meta["rec"]
+        tm = meta.get("task_meta")
+        if tm:       # multi-cube task: <stamp>_task02_green_to_zone2_<OUTCOME>
+            return "%s_%s_%s" % (self.timestamp, tm["stem"], str(rec.get("outcome") or "ERROR"))
         x, y, yaw = (int(round(1000 * rec["true_x"])), int(round(1000 * rec["true_y"])),
                      int(round(rec["true_yaw_deg"])))
         return "%s_run%02d_x%03d_y%+04d_yaw%+04d_%s" % (self.timestamp, self.run, x, y, yaw,
@@ -270,6 +273,18 @@ class RunLog:
         A("timestamp        : %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
         A("run id           : %02d     mode: %s     seed: %s     git: %s" % (self.run, self.mode, self.seed, git_short()))
         A("calibration      : source = %s, timestamp = %s" % (meta.get("calib_source", "?"), meta.get("calib_timestamp", "?")))
+        tm = meta.get("task_meta")
+        if tm:
+            ids = tm.get("cube_ids") or []
+            A("command          : %s" % (tm.get("command") or "-"))
+            A("task             : #%s  %s" % (tm.get("task_idx"), tm.get("target")))
+            A("cube             : %s   tag IDs %s" % (tm.get("cube_name"), ",".join(str(i) for i in ids) or "-"))
+            A("pick pose source : %s" % tm.get("src_pick", "-"))
+            A("target / stacking pose source: %s" % tm.get("src_target", "-"))
+            A("neighbours       : %s obstacles considered, %s candidates rejected NEIGHBOR_COLLISION" % (
+                rec.get("nb_obstacles", "-"), rec.get("nb_rejected", "-")))
+            for ln in tm.get("extra_lines") or []:
+                A(ln)
         A("cube TRUE pose   : x %.1f mm  y %.1f mm  yaw %.2f deg   (ground truth, SCORING ONLY)" % (
             1000 * rec["true_x"], 1000 * rec["true_y"], rec["true_yaw_deg"]))
         if rec.get("est_x", "") != "":
@@ -371,9 +386,33 @@ class RunLog:
                     np.array2string(c * dp / s.T ** k, precision=5, separator=", ") for c, k in
                     ((10, 3), (-15, 4), (6, 5))))
                 A("    q(t) comes from per-step IK (Newton polish, seed = previous q), NOT from the polynomial below; "
-                  "qd, qdd = central differences of the sampled q. worst IK pos err %.2e mm, time-scaling attempts %d" % (
+                  "qd = J_w^+ [pdot; w*omega], qdd = J_w^+ ([pddot; w*alpha] - Jdot_w qd) analytic (weighted damped LS, w = 0.1 on rotation rows as in the IK, "
+                  "pdot/pddot from the quintic, Jdot qd by FD of J). worst IK pos err %.2e mm, time-scaling attempts %d" % (
                       1000 * s.info.get("ik_worst_pos_err_m", 0.0), s.info.get("attempts", 1)))
                 A("    (for reference, the joint polynomial between the same waypoints would use:)")
+            if s.kind == "cartesian-tracking":
+                i_ = s.info
+                v = np.asarray(i_["v"], float)
+                A("    TRACKING (moving target, belt velocity ESTIMATED from the camera, not read from config):")
+                A("      p(t) = p0 + v_est*Ib(t) + dz*s(tau)*e_z,   Ib(t) = w0*t + (w1 - w0)*T*Is(tau),   Is(tau) = 2.5 tau^4 - 3 tau^5 + tau^6,"
+                  "   s(tau) = 10 tau^3 - 15 tau^4 + 6 tau^5")
+                A("      pdot(t) = v_est*(w0 + (w1 - w0)*s(tau)) + dz*s'(tau)/T*e_z ;  pddot(t) = v_est*(w1 - w0)*s'(tau)/T + dz*s''(tau)/T^2*e_z")
+                A("      p0 = (%.4f, %.4f, %.4f) mm   v_est = (%.4f, %.4f, %.4f) mm/s   |v_est| = %.4f mm/s   w0 = %.1f -> w1 = %.1f   dz = %.4f mm" % (
+                    *(1000 * np.asarray(i_["p0"], float)), *(1000 * v), 1000 * float(np.linalg.norm(v)), i_["w0"], i_["w1"], 1000 * i_["dz"]))
+                A("      p(T) = (%.4f, %.4f, %.4f) mm   TCP path length = %.3f mm   (w: belt-velocity weight, 0 -> 1 ramp-in, 1 -> 1 track, 1 -> 0 blend to zero)" % (
+                    *(1000 * np.asarray(i_["p1"], float)), 1000 * i_["length_m"]))
+                A("      orientation constant (tool-down).  q(t) by per-step IK (Newton polish, seed = previous q); qd = J_w^+ [pdot; 0], "
+                  "qdd = J_w^+ ([pddot; 0] - Jdot_w qd) analytic (same weighted damped LS as the Cartesian lines). worst IK pos err %.2e mm, "
+                  "time-scaling attempts %d, limit ratio %.3f" % (1000 * i_.get("ik_worst_pos_err_m", 0.0), i_.get("attempts", 1), i_.get("ratio", 0.0)))
+                if s.g0 != s.g1:
+                    A("      gripper follows g(t) = g0 + (g1 - g0)*s(tau): g0 = %.6f rad -> g1 = %.6f rad while tracking" % (s.g0, s.g1))
+                pv, pa = s.peak()
+                ok = (pv <= lim.vmax * (1 + 1e-9)) & (pa <= lim.amax * (1 + 1e-9))
+                A("    peak |qd| [rad/s]   : %s   (limit %.3f)   peak |qdd| [rad/s^2]: %s   (limit %.3f)  -> %s" % (
+                    np.round(pv, 4).tolist(), lim.vmax[0], np.round(pa, 4).tolist(), lim.amax[0], "OK" if ok.all() else "EXCEEDED"))
+                if not ok.all():
+                    exceeded.append(s.name)
+                continue
             A("    joint   q0 [rad]      D [rad]       a3 [rad/s^3]   a4 [rad/s^4]   a5 [rad/s^5]")
             for j in range(5):
                 A("    J%d  %12.6f  %12.6f  %13.6g  %13.6g  %13.6g" % (j + 1, s.q0[j], D[j], 10 * D[j] / s.T ** 3,

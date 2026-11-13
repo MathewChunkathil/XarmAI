@@ -23,7 +23,10 @@ def config_hash(cfg_paths, seed, board_poses, calib_poses, settings):
     h = hashlib.sha256()
     for k in ("camera", "cube", "workspace"):
         with open(cfg_paths[k], "rb") as f:
-            h.update(k.encode() + f.read().replace(b"\r\n", b"\n"))
+            b = f.read().replace(b"\r\n", b"\n")
+        if k == "workspace":     # the conveyor section (below this marker) never touches the calibration: tuning it keeps the cache valid
+            b = b.split(b"\n# ---- Conveyor belt", 1)[0]
+        h.update(k.encode() + b)
     keys = ("board_inner", "board_square_m", "board_depth_m", "board_lateral_m", "board_tilt_deg", "board_roll_deg",
             "calib_xy_m", "calib_z_m", "calib_tilt_deg", "frames_per_pose", "handeye_outlier_trans_mm", "park_q")
     h.update(json.dumps({"seed": seed, "board": board_poses, "poses": calib_poses,
