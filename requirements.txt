@@ -1,4 +1,4 @@
-# XarmAI simulation - base requirements (Python 3.12, Windows). GPU voice wheels: requirements-gpu.txt
+# XarmAI simulation - base requirements (Python 3.12 ONLY, Windows; numpy 2.5 / contourpy 1.4 have no 3.11 wheels). Use install.bat, not plain pip. GPU voice wheels: requirements-gpu.txt
 charset-normalizer==3.5.2
 contourpy==1.4.0
 cycler==0.12.1
@@ -11,6 +11,7 @@ opencv-python==5.0.0.93
 packaging==26.3
 pillow==13.0.0
 pupil_apriltags==1.0.4.post11
+# no Windows wheel on PyPI: install.ps1 installs the prebuilt cp312 wheel from GitHub release deps-v1 first (else pip must compile it, needs MSVC Build Tools)
 pybullet==3.2.7
 pyparsing==3.3.3
 python-dateutil==4.0.0

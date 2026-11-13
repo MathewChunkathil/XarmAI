@@ -7,10 +7,11 @@
 .PARAMETER Ollama         Install Ollama via winget if missing, start it, pull qwen2.5:3b (AI brain for free-form commands).
 .PARAMETER Whisper        Pre-download the faster-whisper small.en voice model (~480 MB) into models/whisper.
 .PARAMETER All            -Ollama and -Whisper.
-.PARAMETER CpuOnly        Do not install the NVIDIA CUDA wheels (voice runs on CPU).
+.PARAMETER InstallBuildTools  Only if the prebuilt pybullet wheel cannot be downloaded: install Visual Studio 2022 Build Tools (C++) with winget so pybullet can compile.
+.PARAMETER CpuOnly       Do not install the NVIDIA CUDA wheels (voice runs on CPU).
 .PARAMETER Test           Run the unit tests (pytest -q tests/unit -x) at the end.
 #>
-param([switch]$InstallPython, [switch]$Ollama, [switch]$Whisper, [switch]$All, [switch]$CpuOnly, [switch]$Test)
+param([switch]$InstallPython, [switch]$InstallBuildTools, [switch]$Ollama, [switch]$Whisper, [switch]$All, [switch]$CpuOnly, [switch]$Test)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($All) { $Ollama = $true; $Whisper = $true }
@@ -50,6 +51,21 @@ if (-not $pyExe) {
         $pyExe = Find-Python
         if (-not $pyExe) { Fail 'Python 3.12 installed but not visible yet.' 'close this window, open a new one, run install.bat again.' }
     } else {
+        $found = @()
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            foreach ($l in @(& py -0p 2>$null)) {
+                if ("$l" -match '-V:(\d+\.\d+)') { $found += $Matches[1] }
+                elseif ("$l" -match '-(\d+\.\d+)') { $found += $Matches[1] }
+            }
+        }
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+            $pv = & python -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $pv) { $found += "$pv".Trim() }
+        }
+        $found = @($found | Sort-Object -Unique)
+        if ($found.Count -gt 0) {
+            Fail ("Found Python " + ($found -join ', ') + " only. This project needs 3.12 (numpy 2.5 / pybullet wheel).") 'install 3.12 alongside it (they coexist):  install.bat -InstallPython   or https://www.python.org/downloads/'
+        }
         Fail 'Python 3.12 not found.' 'install it from https://www.python.org/downloads/ (tick Add to PATH) or run:  install.bat -InstallPython'
     }
 }
@@ -70,6 +86,64 @@ if (Test-Path $venvPy) {
 # ---- 3. packages ----
 Say 'Upgrading pip ...'
 Native { & $venvPy -m pip install --disable-pip-version-check -q --upgrade pip } 'pip upgrade'
+# pybullet 3.2.7 has no Windows wheel on PyPI (pip would compile it and need C++ Build Tools).
+# We host a prebuilt cp312 wheel in the GitHub release deps-v1 and install it first.
+function Test-MsvcTools {
+    $vw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path $vw)) { return $false }
+    $r = & $vw -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -latest -property installationPath 2>$null
+    return [bool]$r
+}
+$pbWanted = '3.2.7'
+$eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'   # pip show writes a warning to stderr when absent
+$pbHave = (& $venvPy -m pip show pybullet 2>$null | Select-String '^Version:\s*(\S+)')
+$ErrorActionPreference = $eap
+$pbOk = $false
+if ($pbHave -and $pbHave.Matches[0].Groups[1].Value -eq $pbWanted) { $pbOk = $true }
+if ($pbOk) {
+    Ok "pybullet $pbWanted already installed"
+} else {
+    $wheelUrl = 'https://github.com/MathewChunkathil/XarmAI/releases/download/deps-v1/pybullet-3.2.7-cp312-cp312-win_amd64.whl'
+    $wheelSha = '3f633c25f9846b34d5c1d7f4cbf894c9bafef17451dbb93efd8a8cdec8141734'
+    $tmpDir   = Join-Path ([System.IO.Path]::GetTempPath()) ('xarm_wheel_' + [guid]::NewGuid().ToString('N'))
+    $wheel    = Join-Path $tmpDir 'pybullet-3.2.7-cp312-cp312-win_amd64.whl'
+    $wheelOk  = $false
+    Say 'Downloading prebuilt pybullet wheel (67 MB, GitHub release deps-v1) ...'
+    $oldPP = $ProgressPreference
+    try {
+        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $wheelUrl -OutFile $wheel -UseBasicParsing
+        $ProgressPreference = $oldPP
+        $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheel).Hash.ToLower()
+        if ($h -ne $wheelSha) { throw "SHA256 mismatch (got $h)" }
+        Ok 'wheel downloaded, SHA256 verified'
+        $wheelOk = $true
+    } catch {
+        $ProgressPreference = $oldPP
+        Warn "Could not get the prebuilt pybullet wheel: $($_.Exception.Message)"
+    }
+    if ($wheelOk) {
+        Native { & $venvPy -m pip install --disable-pip-version-check $wheel } 'pybullet wheel install'
+        Ok "pybullet $pbWanted installed from prebuilt wheel"
+    } else {
+        if (-not (Test-MsvcTools)) {
+            if ($InstallBuildTools) {
+                if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Fail 'winget not found, cannot install C++ Build Tools.' 'install "Build Tools for Visual Studio 2022" (C++ workload) manually, then run install.bat again.' }
+                Say 'Installing Visual Studio 2022 Build Tools (C++), several GB, needs admin approval ...'
+                & winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --accept-source-agreements --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+                if (-not (Test-MsvcTools)) { Fail 'C++ Build Tools install did not finish.' 'reboot or open a new window and run install.bat again, or install them manually.' }
+                Ok 'C++ Build Tools installed'
+            } else {
+                Fail 'pybullet wheel download failed and no C++ Build Tools found to compile it.' 'check your internet connection and run install.bat again, or run:  install.bat -InstallBuildTools'
+            }
+        }
+        Say 'Building pybullet from source (slow, several minutes) ...'
+        Native { & $venvPy -m pip install --disable-pip-version-check "pybullet==$pbWanted" } 'pybullet build from source'
+    }
+    Remove-Item -Recurse -Force -LiteralPath $tmpDir -ErrorAction SilentlyContinue
+}
 Say 'Installing requirements.txt (first time takes a few minutes) ...'
 Native { & $venvPy -m pip install --disable-pip-version-check -r requirements.txt } 'pip install -r requirements.txt'
 Ok 'base packages installed'

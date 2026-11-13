@@ -36,13 +36,14 @@ Pass them to `install.bat` (or call `powershell -ExecutionPolicy Bypass -File in
 | Switch | What it does |
 |---|---|
 | `-InstallPython` | install Python 3.12 with winget if it is missing |
+| `-InstallBuildTools` | only if the prebuilt pybullet wheel cannot be downloaded: install VS 2022 Build Tools (C++) with winget so pybullet can compile |
 | `-Whisper` | pre-download the voice model `small.en` (~480 MB) into `models/whisper` |
 | `-Ollama` | install Ollama (winget) if missing, start it, `ollama pull qwen2.5:3b` (~1.9 GB) |
 | `-All` | `-Whisper` and `-Ollama` |
 | `-CpuOnly` | skip the NVIDIA CUDA wheels (`requirements-gpu.txt`, ~1 GB). Without this switch they are installed only if `nvidia-smi` finds a GPU |
 | `-Test` | run `pytest -q tests/unit -x` at the end |
 
-Manual install instead: `py -3.12 -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements.txt` (and `-r requirements-gpu.txt` on NVIDIA).
+Manual install instead (pybullet has no Windows wheel on PyPI, so first install the prebuilt one from release `deps-v1`: `.venv\Scripts\python -m pip install https://github.com/MathewChunkathil/XarmAI/releases/download/deps-v1/pybullet-3.2.7-cp312-cp312-win_amd64.whl`): `py -3.12 -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements.txt` (and `-r requirements-gpu.txt` on NVIDIA).
 
 ## Using the app
 Start with `run_app.bat` (same as `.venv\Scripts\python -I scripts\sim_app.py`). Left: 3D view (view only, green PICK zone, orange PLACE zones).
@@ -107,6 +108,8 @@ Config files are YAML and mostly PLACEHOLDER values: `config/workspace/workspace
 - **Window too small / controls cut off**: scroll the control window with the mouse wheel (conveyor panel is at the bottom).
 - **First start is slow**: camera calibration runs once (about 2.5 min) and is cached. Delete `results/sim_calib/sim_calib.json` or press Recalibrate to redo.
 - **Hugging Face symlink warning on download**: harmless.
+- **pybullet fails to build / "Microsoft Visual C++ 14.0 or greater is required"**: pybullet 3.2.7 has no Windows wheel on PyPI, so plain `pip install -r requirements.txt` tries to compile it. `install.bat` avoids this by downloading a prebuilt wheel from the GitHub release `deps-v1` (SHA256 checked). If that download fails (offline, proxy), check the internet or run `install.bat -InstallBuildTools`. The wheel is Python 3.12 only.
+- **"Could not find a version that satisfies numpy==2.5.4" / contourpy errors / you have Python 3.11**: numpy 2.5 and contourpy 1.4 need Python 3.12+, and the pybullet wheel is 3.12 only. Python 3.11 and 3.12 can be installed side by side: run `install.bat -InstallPython`. If you ran `pip install -r requirements.txt` by hand with the wrong Python, delete the `.venv` folder (use `py -3.12`), then run `install.bat`.
 - **PowerShell says scripts are disabled**: use `install.bat` (it bypasses the policy for that one run only).
 
 ## Docs
