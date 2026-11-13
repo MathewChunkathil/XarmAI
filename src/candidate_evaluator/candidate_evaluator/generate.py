@@ -5,7 +5,7 @@ R(psi) = Rz(psi) @ Rx(pi) = [[c, s, 0], [s, -c, 0], [0, 0, -1]].
 Poses are TCP poses (the IK backend applies the flange/TCP offset).
 """
 import math
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -73,8 +73,14 @@ def _in_zone(x, y, z, zone: Dict) -> bool:
 
 def generate(cube_pose: Sequence[float], gripper_cfg: dict, planning_cfg: dict,
              workspace_cfg: dict, task_id: str, cube_edge_m: float = 0.050,
-             cube_cov_trace: float = 0.0) -> List[GraspCandidate]:
+             cube_cov_trace: float = 0.0, obstacles: Optional[Sequence] = None,
+             extra_boxes: Optional[Sequence[Dict]] = None) -> List[GraspCandidate]:
     """cube_pose = (x, y, z, yaw) of the cube centre in link_base (metres, radians).
+
+    obstacles (optional): other cubes (neighbors.Obstacle); candidates whose open fingers would hit one are
+    REJECTED with reason NEIGHBOR_COLLISION (needs gripper_cfg["finger_footprint"]; default None = old behaviour).
+    extra_boxes (optional): further allowed cube-centre boxes besides cube_workspace_box (e.g. the place zones,
+    to pick a cube back up from a zone).
 
     Returns one GraspCandidate per (k, offset). Candidates that fail the geometric
     pre-filter are returned with status REJECTED and a rejection_reason.
@@ -92,7 +98,8 @@ def generate(cube_pose: Sequence[float], gripper_cfg: dict, planning_cfg: dict,
 
     # cube-level pre-filter reason (same for all candidates)
     cube_reason = ""
-    if not (box["x_m"][0] <= x <= box["x_m"][1] and box["y_m"][0] <= y <= box["y_m"][1]):
+    if not any(b["x_m"][0] <= x <= b["x_m"][1] and b["y_m"][0] <= y <= b["y_m"][1]
+               for b in [box] + list(extra_boxes or [])):
         cube_reason = "OUT_OF_WORKSPACE"
     elif open_w > float(gripper_cfg["max_open_m"]) or close_w < float(gripper_cfg.get("min_close_m", 0.0)):
         cube_reason = "GRIPPER_WIDTH"
@@ -134,4 +141,7 @@ def generate(cube_pose: Sequence[float], gripper_cfg: dict, planning_cfg: dict,
                 c.status = STATUS_GENERATED
             cands.append(c)
             n += 1
+    if obstacles:
+        from .neighbors import filter_neighbors
+        filter_neighbors(cands, obstacles, gripper_cfg)
     return cands

@@ -13,7 +13,8 @@ STATUS_NAMES = {0: "GENERATED", 1: "REJECTED", 2: "PLANNED", 3: "SIM_PASSED",
                 4: "SIM_FAILED", 5: "SELECTED"}
 
 REJECTION_REASONS = ("NO_IK", "JOINT_LIMIT", "OUT_OF_WORKSPACE", "COLLISION",
-                     "GRIPPER_WIDTH", "PLAN_FAIL", "STALE", "SIM_COLLISION", "SIM_DROP")
+                     "GRIPPER_WIDTH", "PLAN_FAIL", "STALE", "SIM_COLLISION", "SIM_DROP",
+                     "NEIGHBOR_COLLISION")
 
 SCORE_NAMES = ["motion", "clearance", "kinematic", "grasp", "time"]
 

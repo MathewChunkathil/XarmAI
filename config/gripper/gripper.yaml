@@ -11,3 +11,13 @@ open_margin_m: 0.015              # m, open width = cube edge + margin
 command_timeout_s: 3.0            # s. PLACEHOLDER: unmeasured
 feedback_available: true          # false -> verification relies on camera only. PLACEHOLDER: unmeasured
 # closing axis convention (code): tool +y axis; fingers close along it.
+
+# ---- Finger footprint for the neighbour-cube collision check (2D, tool frame). SIM stand-in: probed from the
+# xArm Gripper stand-in URDF with the gripper fully open (AABB of left/right finger in the TCP frame).
+# NOT the real gripper (unidentified). All PLACEHOLDER. Tool x = along the finger width, tool y = closing axis.
+finger_footprint:
+  open_inner_half_gap_m: 0.0415   # m, tool-y of the inner finger face when fully open (gap 83 mm)
+  finger_outer_half_m: 0.0794     # m, tool-y of the outer finger face
+  finger_half_width_m: 0.019      # m, half extent along tool x
+  finger_bottom_above_tcp_m: 0.007  # m, lowest finger point above the TCP (tool z up) when open: neighbour cubes lower than this cannot be hit
+  safety_margin_m: 0.004          # m, extra clearance to neighbour cubes. PLACEHOLDER

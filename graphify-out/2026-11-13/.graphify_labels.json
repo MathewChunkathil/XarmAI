@@ -1,12 +1,9 @@
 {
-  "0": "Candidate Generation & IK Evaluator",
-  "1": "Tag Generation & PnP Perception",
   "5": "Project Rules & Core Decisions",
   "6": "Hand-Eye Calibration & Kabsch",
   "7": "Cube Model YAML Configuration",
   "8": "AprilTag Fiducial Assets",
   "9": "Simulated C270 Camera Config",
-  "10": "Workspace & Target Zone Config",
   "11": "Candidate Ranking Cost Config",
   "12": "Robot Hardware & Digital Twin",
   "13": "Project Specs & 16-Week Roadmap",

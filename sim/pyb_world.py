@@ -30,6 +30,7 @@ DEFAULT_CFG = {
     "workspace": os.path.join(ROOT, "config", "workspace", "workspace.yaml"),
     "camera": os.path.join(ROOT, "config", "camera", "c270_sim.yaml"),
     "planning": os.path.join(ROOT, "config", "planning", "planning.yaml"),
+    "cubes": os.path.join(ROOT, "config", "cube", "cubes.yaml"),
 }
 
 
@@ -100,6 +101,24 @@ def _tag_tile(tag_id, tile_px, tag_frac):
     return tile
 
 
+def _tint_tile(gray_tile, tag_px, rgb, strength, edge_px):
+    """Colour a tag tile: white quiet zone -> light pastel of `rgb` (strength 0..1), outer edge band -> full colour.
+    The tag itself (black ring + code cells, the square tag_px x tag_px in the centre) is left untouched."""
+    n = gray_tile.shape[0]
+    bgr = np.array(rgb[::-1], np.float32)
+    out = np.repeat(gray_tile[:, :, None], 3, 2).astype(np.float32)
+    pastel = 255.0 * (1 - strength) + bgr * strength
+    o = (n - tag_px) // 2
+    quiet = np.ones((n, n), bool)
+    quiet[o:o + tag_px, o:o + tag_px] = False
+    out[quiet] = pastel
+    if edge_px > 0:
+        band = np.zeros((n, n), bool)
+        band[:edge_px], band[-edge_px:], band[:, :edge_px], band[:, -edge_px:] = True, True, True, True
+        out[band] = bgr
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 class SimWorld:
     def __init__(self, gui=False, cfg_paths=None, gui_panel=False, clean=False, window=(1200, 900), init_q=None):
         """clean=True (sim_app.py): calm 3D view only - no debug panes/sliders, shadows on, nicer colours."""
@@ -108,7 +127,7 @@ class SimWorld:
         self.speed = 1.0             # GUI pacing factor (1 = real time at 240 Hz)
         self._t_next = 0.0
         self.on_step = None          # optional per-step callback (GUI kinematics panel)
-        self.qd = np.zeros(5)        # commanded joint velocity [rad/s] (analytic / central difference per step)
+        self.qd = np.zeros(5)        # commanded joint velocity [rad/s] (analytic)
         self.sim_t = 0.0             # simulated time [s] = played steps * dt (independent of GUI speed / wall clock)
         self.on_segment = None       # optional hook(Segment) called before a segment is played (kin log)
         self.dt_step = 1 / 240
@@ -118,6 +137,8 @@ class SimWorld:
         os.makedirs(CACHE, exist_ok=True)
         self.cube_cfg = _yaml(self.cfg_paths["cube"])
         self.edge = float(self.cube_cfg["edge_m"])
+        self.cubes_cfg = _yaml(self.cfg_paths["cubes"]) if os.path.exists(self.cfg_paths["cubes"]) else {"cubes": []}
+        self.cube_by_num = {int(c["number"]): c for c in self.cubes_cfg["cubes"]}
         if self.clean:
             self.p = bullet_client.BulletClient(pb.GUI, options="--width=%d --height=%d" % tuple(window))
         else:
@@ -132,7 +153,7 @@ class SimWorld:
                 p.configureDebugVisualizer(k, 0)
             p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
             p.configureDebugVisualizer(rgbBackground=[0.13, 0.15, 0.19], lightPosition=[2.5, -2.0, 4.0])
-            p.resetDebugVisualizerCamera(1.05, 10, -34, [0.30, -0.08, 0.08])
+            p.resetDebugVisualizerCamera(1.0, 8, -42, [0.36, 0.0, 0.03])      # wide enough for all 3 place zones
         elif gui:
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1 if gui_panel else 0)
             p.resetDebugVisualizerCamera(1.1, 140, -35, [0.3, 0, 0.1])
@@ -185,11 +206,14 @@ class SimWorld:
         plan = _yaml(self.cfg_paths["planning"]) if os.path.exists(self.cfg_paths["planning"]) else {}
         self.limits = traj.load_limits(plan, [p.getJointInfo(self.robot, j)[11] for j in self.arm_j])
 
-        self.cube = None
+        self.cube = None                 # ACTIVE cube body (attach / detach / set_cube_pose / cube_pose_true act on it)
+        self.cubes = {}                  # cube number -> body (multi-cube mode); the legacy single cube is not in here
+        self.cube_num = None
         self.cube_attached = None
         self._T_tcp_cube = None
         self.calib_tag_body = None
         self.T_tcp_tag = None
+        self.belt = None                 # sim.conveyor.Conveyor (added by add_conveyor; None = no belt, the default)
         self._quad_off = np.eye(4)
         self.set_arm(init_q if init_q is not None else self.workspace.get("ready_joint_state_rad", [0, -0.5, -0.5, 0, 0]))
         self.set_gripper(0.0)
@@ -236,18 +260,33 @@ class SimWorld:
     def _set_pose(self, body, M):
         self.p.resetBasePositionAndOrientation(body, M[:3, 3].tolist(), quat_from_R(M[:3, :3]))
 
-    def _build_cube_assets(self):
+    def _build_cube_assets(self, number=None):
+        """Texture atlas + mesh. number=None: legacy plain white cube with cube_model.yaml IDs (unchanged).
+        number=n: cube n of cubes.yaml: its own tag IDs, tinted quiet zone, full-colour bottom face."""
         cc = self.cube_cfg
         e = self.edge
         tile = 512
         frac = cc["tag_size_m"] / e
-        atlas = np.full((2 * tile, 3 * tile), 255, np.uint8)  # 3 cols x 2 rows
         faces = cc["faces"]
-        for k, fc in enumerate(faces):  # slots 0..4 tags; slot 5 stays blank white (bottom)
+        ce = self.cube_by_num.get(number) if number is not None else None
+        tint = self.cubes_cfg.get("tint", {}) if ce else {}
+        strength = float(tint.get("margin_strength", 0.0))
+        edge_px = int(round(float(tint.get("edge_band_frac", 0.0)) * tile))
+        tag_px = int(round(tile * frac / 8)) * 8
+        atlas = np.full((2 * tile, 3 * tile, 3), 255, np.uint8)  # 3 cols x 2 rows, BGR
+        for k, fc in enumerate(faces):  # slots 0..4 tags; slot 5 = bottom
             r, c = divmod(k, 3)
-            atlas[r * tile:(r + 1) * tile, c * tile:(c + 1) * tile] = _tag_tile(fc["id"], tile, frac)
-        fimg = os.path.join(CACHE, "cube_atlas.png")
-        cv2.imwrite(fimg, cv2.cvtColor(atlas, cv2.COLOR_GRAY2BGR))
+            tid = int(ce["face_ids"][k]) if ce else fc["id"]
+            g = _tag_tile(tid, tile, frac)
+            t3 = (_tint_tile(g, tag_px, ce["color_rgb"], strength, edge_px) if ce
+                  else cv2.cvtColor(g, cv2.COLOR_GRAY2BGR))
+            atlas[r * tile:(r + 1) * tile, c * tile:(c + 1) * tile] = t3
+        if ce:      # bottom face (slot 5, col 2 row 1): full cube colour
+            atlas[tile:, 2 * tile:] = np.array(ce["color_rgb"][::-1], np.uint8)
+        # file name carries the tint (PyBullet caches textures by file name)
+        fimg = os.path.join(CACHE, "cube_atlas.png" if ce is None else "cube_atlas_%d_t%03d_e%02d.png" % (
+            number, int(round(100 * strength)), edge_px))
+        cv2.imwrite(fimg, atlas)
         h = e / 2
 
         def uv_of(k, a, b):  # tag-plane coords (x right, y up) -> atlas uv (v up from image bottom)
@@ -262,34 +301,51 @@ class SimWorld:
             t = np.array(fc["t_cube_tag"], float)
             ab = [(-h, -h), (h, -h), (h, h), (-h, h)]
             quads.append(([R @ np.array([a, b, 0.0]) + t for a, b in ab], [uv_of(k, a, b) for a, b in ab], R[:, 2]))
-        buv = [(2.5 / 3, 1 - 1.5 / 2)] * 4  # centre of blank slot 5 (col 2,row 1)
+        buv = [(2.5 / 3, 1 - 1.5 / 2)] * 4  # centre of slot 5 (col 2,row 1)
         quads.append(([(-h, h, -h), (h, h, -h), (h, -h, -h), (-h, -h, -h)], buv, (0, 0, -1)))
         fobj = os.path.join(CACHE, "cube_%0.4f.obj" % e)
         _write_obj(fobj, quads)
         return fobj, fimg
 
     # ---------------- cube ----------------
-    def spawn_cube(self, x, y, yaw):
+    def spawn_cube(self, x, y, yaw, number=None, z=None):
+        """number=None: the legacy single white cube (replaces the active cube). number=n: coloured identified cube n
+        (replaces only cube n) and it becomes the active cube. z = centre height (default: resting on the table)."""
         p = self.p
-        if self.cube is not None:
-            self.detach_cube()
-            self.remove(self.cube)
-        fobj, fimg = self._build_cube_assets()
+        if number is None:
+            if self.cube is not None:
+                self.detach_cube()
+                self.remove(self.cube)
+        elif number in self.cubes:
+            if self.cube == self.cubes[number]:
+                self.detach_cube()
+            self.remove(self.cubes[number])
+        fobj, fimg = self._build_cube_assets(number)
         e = self.edge
         vs = p.createVisualShape(pb.GEOM_MESH, fileName=fobj, meshScale=[1, 1, 1], rgbaColor=[1, 1, 1, 1])
         cs = p.createCollisionShape(pb.GEOM_BOX, halfExtents=[e / 2] * 3)
         q = p.getQuaternionFromEuler([0, 0, yaw])
-        self.cube = p.createMultiBody(float(self.cube_cfg["mass_kg"]), cs, vs,
-                                      [x, y, self.table_top_z + e / 2 + 0.002], q)
-        p.changeVisualShape(self.cube, -1, textureUniqueId=p.loadTexture(fimg))
-        p.changeDynamics(self.cube, -1, lateralFriction=0.8, rollingFriction=0.001, spinningFriction=0.001)
+        zc = self.table_top_z + e / 2 + 0.002 if z is None else z
+        body = p.createMultiBody(float(self.cube_cfg["mass_kg"]), cs, vs, [x, y, zc], q)
+        p.changeVisualShape(body, -1, textureUniqueId=p.loadTexture(fimg))
+        p.changeDynamics(body, -1, lateralFriction=0.8, rollingFriction=0.001, spinningFriction=0.001)
+        self.cube = body
+        if number is not None:
+            self.cubes[number], self.cube_num = body, number
         for _ in range(240):
             p.stepSimulation()
-        return self.cube
+        return body
 
-    def cube_pose_true(self):
-        """4x4 world<-cube. GROUND TRUTH, for scoring only."""
-        pos, q = self.p.getBasePositionAndOrientation(self.cube)
+    def activate_cube(self, number):
+        """Make cube `number` the active cube (the one attach/detach/cube_pose_true/set_cube_pose act on)."""
+        if self.cube_attached is not None:
+            self.detach_cube()
+        self.cube, self.cube_num = self.cubes[number], number
+
+    def cube_pose_true(self, number=None):
+        """4x4 world<-cube. GROUND TRUTH, for scoring only. number=None: the active cube."""
+        body = self.cube if number is None else self.cubes[number]
+        pos, q = self.p.getBasePositionAndOrientation(body)
         return T_from(pos, q)
 
     # ---------------- arm ----------------
@@ -396,7 +452,31 @@ class SimWorld:
             p.resetJointState(rb, j, v)
         return q, pe, re
 
+    def add_conveyor(self):
+        """Build the conveyor belt of workspace.yaml `conveyor:` in this world (idempotent). Not built by default, so
+        the scored single-cube demo / calibration never see it. -> Conveyor (or None when the config has none)."""
+        if self.belt is None and self.workspace.get("conveyor"):
+            from sim.conveyor import Conveyor, ConveyorCfg
+            self.belt = Conveyor(ConveyorCfg(self.workspace["conveyor"], self.table_top_z, self.edge))
+            self.belt.build(self.p)
+        return self.belt
+
+    def idle(self, seconds):
+        """Let sim time pass with the arm / gripper left as they are (belt keeps moving). Paced like play() in the GUI."""
+        for _ in range(int(round(seconds / self.dt_step))):
+            self._tick()
+
+    def advance_fast(self, n):
+        """n sim steps without GUI pacing / callbacks (app idle loop: belt animation in real time)."""
+        for _ in range(int(n)):
+            if self.belt is not None:
+                self.belt.step(self, self.dt_step)
+            self.p.stepSimulation()
+            self.sim_t += self.dt_step
+
     def _tick(self):
+        if self.belt is not None:
+            self.belt.step(self, self.dt_step)
         self.p.stepSimulation()
         self.sim_t += self.dt_step
         if self.on_step is not None:
@@ -420,6 +500,8 @@ class SimWorld:
         for i in range(seg.n):
             if arm_moves:
                 self.set_arm(seg.Q[i])
+                if seg.kind == "cartesian-tracking" and seg.g0 != seg.g1:       # tracking while the gripper closes
+                    self.set_gripper(seg.G[i])
             else:
                 self.set_gripper(seg.G[i])
             self.qd = seg.QD[i]
@@ -449,13 +531,17 @@ class SimWorld:
             return None
         return self.play(traj.plan_gripper(name, self.arm_q(), cur, ang, self.limits))
 
-    def set_cube_pose(self, x, y, yaw, settle=240):
-        """Teleport the existing cube to (x, y, yaw) on the table and let it settle."""
+    def set_cube_pose(self, x, y, yaw, settle=240, z=None, number=None):
+        """Teleport a cube (default: the active one) to (x, y, yaw) on the table (or at height z) and let it settle."""
         p = self.p
-        self.detach_cube()
-        p.resetBasePositionAndOrientation(self.cube, [x, y, self.table_top_z + self.edge / 2 + 0.002],
-                                          p.getQuaternionFromEuler([0, 0, yaw]))
-        p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
+        if number is not None and self.cubes[number] != self.cube:
+            body = self.cubes[number]
+        else:
+            self.detach_cube()
+            body = self.cube
+        zc = self.table_top_z + self.edge / 2 + 0.002 if z is None else z
+        p.resetBasePositionAndOrientation(body, [x, y, zc], p.getQuaternionFromEuler([0, 0, yaw]))
+        p.resetBaseVelocity(body, [0, 0, 0], [0, 0, 0])
         for _ in range(settle):
             p.stepSimulation()
 
@@ -536,6 +622,10 @@ class SimWorld:
             self.calib_tag_body = None
         if body == self.cube:
             self.cube = None
+        for n in [n for n, b in self.cubes.items() if b == body]:
+            del self.cubes[n]
+            if self.cube_num == n:
+                self.cube_num = None
         self.p.removeBody(body)
 
     # ---------------- visual-only zone overlays (sim_app) ----------------
@@ -561,10 +651,22 @@ class SimWorld:
             box(x0, cy, e / 2, hy, 0.001, z0 + 0.001, [*rgb, 0.9])
             box(x1, cy, e / 2, hy, 0.001, z0 + 0.001, [*rgb, 0.9])
         zone(ws["cube_workspace_box"], (0.20, 0.80, 0.40))
-        zone(ws["place_zone"], (0.98, 0.55, 0.15))
-        pt = ws["place_target"]
-        vs = p.createVisualShape(pb.GEOM_CYLINDER, radius=0.012, length=0.002, rgbaColor=[1.0, 0.35, 0.10, 0.9])
-        bodies.append(p.createMultiBody(0, -1, vs, [pt["x_m"], pt["y_m"], z0 + 0.0015]))
+        from sim.zones import place_zones
+        for zn in place_zones(ws):
+            rgb = tuple(c / 255.0 for c in zn["color_rgb"])
+            zone(zn, rgb)
+            pt = zn["target"]
+            vs = p.createVisualShape(pb.GEOM_CYLINDER, radius=0.012, length=0.002, rgbaColor=[*rgb, 0.95])
+            bodies.append(p.createMultiBody(0, -1, vs, [pt["x_m"], pt["y_m"], z0 + 0.0015]))
+            # zone number plate (visual only): digit on a coloured square lying on the table at the zone's near corner
+            img = np.full((128, 128, 3), [int(c * 255) for c in rgb[::-1]], np.uint8)
+            cv2.putText(img, str(zn["number"]), (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 3.2, (255, 255, 255), 8, cv2.LINE_AA)
+            # unrotated: plate frame is x right / y up, same as the table view with +x to the right
+            plate = self._textured_quad(img, 0.045, 0.045, "zone_label_%d" % zn["number"])
+            M = np.eye(4)
+            M[:3, 3] = [zn["x_m"][0] + 0.03, zn["y_m"][0] + 0.03, z0 + 0.003]
+            self._set_pose(plate, M)
+            bodies.append(plate)
         return bodies
 
     def is_connected(self):

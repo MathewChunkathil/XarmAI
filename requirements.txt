@@ -1,7 +1,9 @@
-﻿charset-normalizer==3.5.2
+# XarmAI simulation - base requirements (Python 3.12, Windows). GPU voice wheels: requirements-gpu.txt
+charset-normalizer==3.5.2
 contourpy==1.4.0
 cycler==0.12.1
 fonttools==4.68.0
+faster-whisper==1.2.1
 kiwisolver==1.5.1
 matplotlib==3.11.2
 numpy==2.5.4
@@ -13,5 +15,8 @@ pybullet==3.2.7
 pyparsing==3.3.3
 python-dateutil==4.0.0
 reportlab==5.1.0
+sounddevice==0.5.6
 tzdata==2026.6
 dearpygui==2.3.1
+PyYAML==6.0.3
+pytest==9.2.0

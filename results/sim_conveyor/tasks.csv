@@ -1,0 +1,3 @@
+idx,task,outcome,pick_src,target_src,nb,feasible,err,dz,pos_err,detail,kin
+1,feed red (cube 1) onto the conveyor,SUCCESS,-,-,0/0,,,,,"red cube fed at s=40 mm, lateral +3.3 mm, yaw -83 deg; belt running 6.0 cm/s",
+2,"pick red (cube 1) from the conveyor, place in zone 2",MISSED,perception,"zone 2 slot (0.350, 0.315) from workspace.yaml place_zones",0/0,4/4,,,0.4,cube would reach the end stop before the gripper is closed (s(attach) = 232 mm),

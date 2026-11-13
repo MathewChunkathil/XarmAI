@@ -1,0 +1,24 @@
+# Three identified cubes sharing the geometry of cube_model.yaml (edge, tag size, face frames).
+# Each cube has its OWN set of tag36h11 IDs for its 5 tagged faces, so perception can tell the cubes apart:
+# detect all tags -> group by ID set -> cube identity -> PnP per cube (same math as the single-cube model).
+# face_ids order = the face order of cube_model.yaml faces:  +z, +x, -x, +y, -y   (bottom face: no tag).
+# Calibration tag id (cube_model.yaml calib_tag.id = 10) is NOT used here. Cube 1 keeps the original IDs 0..4.
+# Colours are PLACEHOLDER (sim looks only). tint_* control how the cube colour is painted onto the texture
+# (white quiet zone around each tag is tinted lightly so detection is not hurt; see scripts/measure_tint.py).
+schema_version: 1
+tint:
+  margin_strength: 0.35         # 0 = plain white quiet zone, 1 = full colour. Measured, see results/tint_measurement.md
+  edge_band_frac: 0.025         # full-colour band along each face edge (fraction of the face edge)
+cubes:
+  - number: 1
+    name: red
+    color_rgb: [214, 48, 49]
+    face_ids: [0, 1, 2, 3, 4]
+  - number: 2
+    name: green
+    color_rgb: [46, 170, 80]
+    face_ids: [5, 6, 7, 8, 9]
+  - number: 3
+    name: blue
+    color_rgb: [50, 100, 230]
+    face_ids: [11, 12, 13, 14, 15]

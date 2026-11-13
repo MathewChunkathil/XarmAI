@@ -33,6 +33,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import sim_demo as sd  # noqa: E402  (adds ROOT + src/* to sys.path)
 from sim import calib_cache as cc  # noqa: E402
+from sim import commands as cmd_mod  # noqa: E402
+from sim import intent as intent_mod  # noqa: E402
+from sim import tts  # noqa: E402
+from sim import zones as zn  # noqa: E402
+from sim.task_runner import TaskRunner, M as TM  # noqa: E402
+from sim.voice import VoiceInput, read_wav_16k, MAX_RECORD_S  # noqa: E402
 
 import dearpygui.dearpygui as dpg  # noqa: E402
 import pybullet as pb  # noqa: E402
@@ -48,6 +54,8 @@ GREEN = (74, 205, 125)
 RED = (240, 96, 96)
 AMBER = (246, 188, 70)
 CHIP = {"Calibrating": AMBER, "Ready": (70, 130, 220), "Running": ACCENT, "Done": GREEN, "Failed": RED}
+TASK_COL = {"queued": MUTED, "running": ACCENT, "done": GREEN, "failed": RED, "skipped": AMBER}
+DEFAULT_POS = {1: (0.375, 0.05), 2: (0.30, -0.03), 3: (0.45, 0.13)}        # mm-free defaults, >= 0.11 m apart
 OUTCOME_COL = {"SUCCESS": GREEN}
 
 try:        # crisp rendering: work in physical pixels, scale the design (made at 96 dpi) by S
@@ -65,8 +73,18 @@ def sc(v):
 VP_W, VP_H = sc(980), min(sc(1010), SCR_H - 70)
 PB_W, PB_H = max(700, min(1300, SCR_W - VP_W - 40)), min(SCR_H - 110, 1100)
 LEFT_W = sc(380)
-CAM_W, CAM_H = sc(528), sc(297)
+CAM_W, CAM_H = sc(400), sc(225)
+PREV_W, PREV_H = 400, 225        # idle preview render size (aux TinyRenderer)
+PROFILE = float(os.environ.get("XARM_APP_PROFILE", "0") or 0)     # seconds of idle profiling, then exit
+PROFILE_AFTER = 4.0                                              # seconds after Ready before measuring
+PROFILE_CUBES = [int(v) for v in os.environ.get("XARM_APP_START_CUBES", "1").split(",")]    # cubes enabled at start
 DEG = "\u00b0"
+MIC_IDLE = "🎤 Hold to talk / SPACE"
+BELT_HELP = ("CONVEYOR\n"
+             "1. Start belt: the belt runs at the speed on the slider (0-6 cm/s).\n"
+             "2. Feed cube: puts the chosen cube at the start of the belt; it rides along.\n"
+             "3. Tick 'Pick from belt to zone N' before Feed: the arm tracks the moving cube, grasps it and places it in zone N.\n"
+             "Voice / text: 'start the conveyor', 'set belt speed to 4', 'put the red cube on the belt and catch it into zone 2'.")
 
 
 class Cancel(Exception):
@@ -167,11 +185,25 @@ class App:
         self.t_pump = self.t_live = self.t_plot = self.t_cam = 0.0
         self.cam_frozen = False
         self.fps = 0.0
+        self.voice = None                               # VoiceInput, created once self.tee exists (below)
+        self.voice_state = "idle"                       # idle | listening | transcribing
+        self.voice_q = collections.deque()              # (text, info, error) from the transcription worker thread
+        self.mic_src = ""                               # "button" | "key"
+        self.voice_heard = ""
+        self.intent = intent_mod.IntentEngine(intent_mod.load_config())      # rules -> Ollama proposal -> fuzzy; user confirms
+        self.pending = None                             # (Proposal, text, source) waiting for yes / no
+        self.think_q = collections.deque()              # (Proposal, text, source) from the understanding worker thread
+        self.thinking = 0                               # running worker threads
+        self.brain = ("", AMBER)                        # status line text, colour
+        self._shot_pending = False
+        self.autoconfirm = bool(os.environ.get("XARM_APP_AUTOCONFIRM"))
+        self._ui_cache = {}                             # tag -> last value / config (skip redundant dpg calls)
+        self.prof = collections.defaultdict(float)       # XARM_APP_PROFILE=<s>: idle time per frame part
         self._fps_t, self._fps_n = time.perf_counter(), 0
         self.step_n = 0
         self.t_render = self.t_live_cost = 0.0
         self.run_t0 = self.run_s0 = 0.0
-        self.ready_t = None
+        self.ready_t = self.ready_abs = None
         self.hist_q = collections.deque(maxlen=240)      # (t, [5 deg])
         self.calib = {"state": "none", "done": 0, "total": 1, "stage": "", "result": None, "error": None}
         self.cancel = False
@@ -185,22 +217,42 @@ class App:
         self.test_result = None
 
         sd.log = self.tee                                   # Pipeline log() -> app log (thread-safe deque)
+        self.voice = VoiceInput(log=self.tee)
         a = argparse.Namespace(gui=True, auto=True, app=True, seed=0, runs=1, calib_poses=20, board_poses=20,
                                out=os.path.join(ROOT, "results", "sim_app"), use_calib_cache=False, hold=False, window=(PB_W, PB_H))
         self.args = a
         self.P = sd.Pipeline(a)
         self.w = self.P.world
+        self.R = TaskRunner(self.P)
+        self.names = self.R.names
+        self.sel = 1
+        self.cmd_stop = False
+        self.task_rows = []                                 # [(text, state, err)] of the running / last command
+        self.cs = {n: {"on": n in PROFILE_CUBES, "x": 1000 * DEFAULT_POS[n][0], "y": 1000 * DEFAULT_POS[n][1], "yaw": 0.0}
+                   for n in self.names}
         self.P.on_frame = self.on_frame
         self.w.on_step = self.on_step
         self.zones = self.w.add_zone_overlays()
+        self.belt = self.w.add_conveyor()                   # conveyor (visible world; the hidden camera world gets a copy on sync)
+        if self.belt is not None:
+            self.zones += self.belt.add_window_overlay()
+        self.t_belt, self.belt_acc, self.track_steps, self.test_track = time.perf_counter(), 0.0, 0, False
         self.pump_hook_ik()
         self.chash = self.P.calib_hash()
         box, m = self.P.ws["cube_workspace_box"], sd.S["cube_margin_m"]
         self.bx = (1000 * (box["x_m"][0] + m), 1000 * (box["x_m"][1] - m))
         self.by = (1000 * (box["y_m"][0] + m), 1000 * (box["y_m"][1] - m))
         self.build_ui()
-        self.applied = self.slider_vals()
-        self.w.spawn_cube(*self.applied)
+        self.voice.start_loading()                          # background thread: the UI never blocks on the model
+        if os.environ.get("XARM_APP_TEST"):
+            tts.enabled = False                             # silent test runs
+        self.start_brain_check()
+        self.applied = {}
+        self.sync_cube_widgets()
+        for n, c in self.cs.items():
+            if c["on"]:
+                self.R.put_cube(n, c["x"] / 1000, c["y"] / 1000, math.radians(c["yaw"]))
+                self.applied[n] = self.state_tuple(n)
         self.w.set_arm(sd.S["park_q"])
         place_pybullet_window(0, 0)
         d = cc.load(self.chash)
@@ -243,11 +295,14 @@ class App:
         if not dpg.is_dearpygui_running() or not self.w.is_connected():
             raise sd.UserStop("window closed")
         self.update_live(now)
+        self.update_voice_ui()
         self.flush_log()
         t1 = time.perf_counter()
         dpg.render_dearpygui_frame()
         self.t_render += time.perf_counter() - t1
         self.t_live_cost += t1 - now
+        self.prof["live+log"] += t1 - now
+        self.prof["dpg_render"] += time.perf_counter() - t1
         self._fps_n += 1
         if now - self._fps_t > 1.0:
             self.fps = self._fps_n / (now - self._fps_t)
@@ -263,6 +318,11 @@ class App:
                 dpg.stop_dearpygui()
             else:
                 self.w.p.disconnect()
+        if self.P.phase == "track":
+            self.track_steps += 1
+        if self.test and not self.test_track and self.busy and self.P.phase == "track" and self.track_steps >= 150:
+            self.test_track = True
+            self.take_shots("02a_mid_tracking")
         if self.test and not self.test_mid and self.busy and self.P.phase in ("place",):
             self.test_mid = True
             self.take_shots("02_mid_motion")
@@ -284,12 +344,14 @@ class App:
         (the full camera model is used for perception and after each run)."""
         cam = self.P.cam
         self.P.sync_aux()
-        img = self.P.aux.p.getCameraImage(640, 360, cam.view, cam.proj, renderer=pb.ER_TINY_RENDERER, shadow=0)[2]
-        return cv2.cvtColor(np.asarray(img, np.uint8).reshape(360, 640, 4)[:, :, :3], cv2.COLOR_RGB2BGR)
+        w, h = PREV_W, PREV_H           # TinyRenderer cost ~ pixels: 400x225 ~ 35 ms vs 640x360 ~ 95 ms
+        img = self.P.aux.p.getCameraImage(w, h, cam.view, cam.proj, renderer=pb.ER_TINY_RENDERER, shadow=0)[2]
+        return cv2.cvtColor(np.asarray(img, np.uint8).reshape(h, w, 4)[:, :, :3], cv2.COLOR_RGB2BGR)
 
     def set_cam(self, bgr):
-        r = cv2.resize(bgr, (CAM_W, CAM_H), interpolation=cv2.INTER_AREA)
-        self.cam_view[..., :3] = r[..., ::-1] * np.float32(1 / 255.0)
+        r = bgr if bgr.shape[:2] == (CAM_H, CAM_W) else cv2.resize(
+            bgr, (CAM_W, CAM_H), interpolation=cv2.INTER_AREA if bgr.shape[1] > CAM_W else cv2.INTER_LINEAR)
+        np.multiply(r[..., ::-1], np.float32(1 / 255.0), out=self.cam_view[..., :3])
 
     # ------------------------------------------------------------ UI
     def build_ui(self):
@@ -310,10 +372,28 @@ class App:
                 except Exception:
                     pass
         self.big = big if font_ok else None
+        self.emoji_font = None
+        try:
+            if os.path.exists("C:/Windows/Fonts/seguiemj.ttf"):
+                with dpg.font_registry():
+                    with dpg.font("C:/Windows/Fonts/seguiemj.ttf", sc(13)) as ef:
+                        dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                        dpg.add_font_range(0x1F3A4, 0x1F3A4)
+                self.emoji_font = ef
+        except Exception:
+            self.emoji_font = None
         dpg.bind_theme(make_theme())
         th_primary = button_theme((46, 124, 246), (70, 146, 255), (34, 100, 210))
         th_ghost = button_theme((48, 54, 70), (62, 70, 92), (74, 84, 110), rounding=8)
         self.chip_th = {k: button_theme(c, c, c, text=(20, 22, 28), rounding=14) for k, c in CHIP.items()}
+        self.cube_th = {}
+        for n in self.names:        # swatch buttons: dim = not selected, full colour + white text = selected
+            r_, g_, b_ = self.R.cube_set[n].rgb
+            dim = (int(r_ * 0.38) + 14, int(g_ * 0.38) + 14, int(b_ * 0.38) + 14)
+            self.cube_th[n] = {False: button_theme(dim, (r_ // 2, g_ // 2, b_ // 2), (r_, g_, b_), text=(200, 205, 215), rounding=8),
+                               True: button_theme((r_, g_, b_), (min(255, r_ + 25), min(255, g_ + 25), min(255, b_ + 25)),
+                                                  (r_, g_, b_), text=(255, 255, 255), rounding=8)}
+        self.task_th = None
 
         flat = np.zeros(CAM_W * CAM_H * 4, np.float32)
         self.cam_view = flat.reshape(CAM_H, CAM_W, 4)
@@ -343,12 +423,28 @@ class App:
                 dpg.add_button(label="Calibrating", tag="chip", width=sc(130), height=sc(30))
                 dpg.add_spacer(width=sc(10))
                 dpg.add_text("SIMULATION ONLY", color=AMBER, tag="t_sim")
+            with dpg.group(horizontal=True):
+                dpg.add_text("CALIBRATION", color=ACCENT)
+                dpg.add_progress_bar(tag="c_bar", width=sc(190), height=sc(16), overlay="")
+                dpg.add_text("-", tag="c_src")
+                dpg.add_text("", tag="c_rms", color=MUTED)
+                dpg.add_text("", tag="c_ext", color=MUTED)
             dpg.add_spacer(height=sc(2))
             with dpg.group(horizontal=True):
-                # ================= left column
-                with dpg.group():
-                    with dpg.child_window(width=LEFT_W, height=sc(178), no_scrollbar=True):
-                        title("Cube pose")
+                # ================= left column (scrolls: on a small / high-DPI screen the lower panels would be cut off)
+                with dpg.child_window(width=LEFT_W + sc(18), height=-1, border=False, tag="left_col"):
+                    with dpg.child_window(width=LEFT_W, height=sc(262), no_scrollbar=True):
+                        title("Cubes & layout")
+                        with dpg.group(horizontal=True):
+                            for n in self.names:
+                                with dpg.group():
+                                    bsel = dpg.add_button(label="%s (%d)" % (self.names[n].title(), n), tag="cb_%d" % n,
+                                                          width=(LEFT_W - sc(40)) // 3, height=sc(28),
+                                                          callback=self.on_select, user_data=n)
+                                    dpg.bind_item_theme(bsel, self.cube_th[n][n == self.sel])
+                                    dpg.add_checkbox(label="in scene", tag="ck_%d" % n, default_value=self.cs[n]["on"],
+                                                     callback=self.on_toggle, user_data=n)
+                        dpg.add_text("Sliders move: red cube", tag="t_sel", color=MUTED)
                         for lab, tag, rng, dv, fmt in (
                                 ("X", "sl_x", self.bx, 0.5 * sum(self.bx), "%.0f mm"),
                                 ("Y", "sl_y", self.by, 0.5 * sum(self.by), "%.0f mm"),
@@ -359,55 +455,125 @@ class App:
                                 dpg.add_slider_float(tag=tag, min_value=rng[0], max_value=rng[1], default_value=dv,
                                                      format=fmt, width=-1, callback=self.on_slider)
                         with dpg.group(horizontal=True):
-                            b = dpg.add_button(label="Random pose", width=(LEFT_W - sc(38)) // 2, height=sc(34),
-                                               tag="b_rand", callback=lambda: self.req.append("random"))
-                            c = dpg.add_button(label="Centre", width=-1, height=sc(34), tag="b_centre",
-                                               callback=lambda: self.req.append("centre"))
-                            dpg.bind_item_theme(b, th_ghost)
-                            dpg.bind_item_theme(c, th_ghost)
-                    with dpg.child_window(width=LEFT_W, height=sc(192), no_scrollbar=True):
+                            bw = (LEFT_W - sc(44)) // 3
+                            for lab, tag, r in (("Random pose", "b_rand", "random"), ("Centre", "b_centre", "centre"),
+                                                ("Random layout", "b_layout", "layout")):
+                                bb = dpg.add_button(label=lab, width=bw, height=sc(32), tag=tag,
+                                                    callback=lambda s_, a_, u: self.req.append(u), user_data=r)
+                                dpg.bind_item_theme(bb, th_ghost)
+                    with dpg.child_window(width=LEFT_W, height=sc(372), no_scrollbar=True):
+                        title("Commands")
+                        dpg.add_input_text(tag="cmd_in", hint="place the green cube in zone 1 and stack red on green",
+                                           width=-1, on_enter=True, callback=self.on_cmd_enter)
+                        with dpg.group(horizontal=True):
+                            br = dpg.add_button(label="Run", tag="b_run", width=sc(70), height=sc(30),
+                                                callback=lambda: self.submit_command(dpg.get_value("cmd_in"), "text"))
+                            dpg.bind_item_theme(br, th_primary)
+                            bs = dpg.add_button(label="Stop after current task", tag="b_stop", width=-1, height=sc(30),
+                                                callback=self.on_stop, enabled=False)
+                            dpg.bind_item_theme(bs, th_ghost)
+                        # voice: hold the button (or SPACE) to talk; release -> faster-whisper -> self.submit_command(.., "voice")
+                        with dpg.group(horizontal=True):
+                            bm = dpg.add_button(label=MIC_IDLE, tag="b_mic", width=sc(196), height=sc(28), enabled=False)
+                            dpg.bind_item_theme(bm, th_ghost)
+                            if self.emoji_font:
+                                dpg.bind_item_font(bm, self.emoji_font)
+                            with dpg.tooltip("b_mic"):
+                                dpg.add_text("Voice: loading...", tag="mic_tip")
+                            dpg.add_checkbox(label="Speak replies", tag="ck_speak", default_value=tts.available(),
+                                             callback=lambda s_, a_: setattr(tts, "enabled", bool(a_)))
+                        dpg.add_progress_bar(tag="v_level", width=-1, height=sc(20), default_value=0.0, overlay="Voice: loading...")
+                        dpg.add_text("", tag="v_heard", wrap=LEFT_W - sc(30), color=(190, 198, 214), show=False)
+                        dpg.add_text("Brain: checking ...", tag="brain_line", color=MUTED, wrap=LEFT_W - sc(30))
+                        dpg.add_text("Thinking ...", tag="cmd_think", color=AMBER, show=False)
+                        with dpg.group(tag="confirm_box", show=False):
+                            dpg.add_text("", tag="confirm_q", wrap=LEFT_W - sc(30), color=AMBER)
+                            with dpg.group(horizontal=True):
+                                by_ = dpg.add_button(label="Yes, do it", tag="b_yes", width=(LEFT_W - sc(38)) // 2, height=sc(30),
+                                                     callback=lambda: self.submit_command("yes", "text"))
+                                dpg.bind_item_theme(by_, th_primary)
+                                bn_ = dpg.add_button(label="No", tag="b_no", width=-1, height=sc(30),
+                                                     callback=lambda: self.submit_command("no", "text"))
+                                dpg.bind_item_theme(bn_, th_ghost)
+                        dpg.add_text("", tag="cmd_echo", wrap=LEFT_W - sc(30), color=(190, 198, 214))
+                        dpg.add_text("", tag="cmd_err", color=RED, wrap=LEFT_W - sc(30), show=False)
+                        with dpg.child_window(width=-1, height=-1, border=False):
+                            with dpg.table(tag="t_task", header_row=True, row_background=True, borders_innerH=True,
+                                           policy=dpg.mvTable_SizingStretchProp, scrollY=True, height=-1):
+                                for c_, wd in (("#", 0.3), ("Task", 3.4), ("Status", 1.1), ("Err mm", 0.9)):
+                                    dpg.add_table_column(label=c_, init_width_or_weight=wd)
+                    with dpg.child_window(width=LEFT_W, height=sc(158), no_scrollbar=True):
                         title("Actions")
-                        pb_ = dpg.add_button(label="Pick & Place", width=-1, height=sc(50), tag="b_pick",
-                                             callback=lambda: self.req.append("pick"))
-                        dpg.bind_item_theme(pb_, th_primary)
-                        if self.big:
-                            dpg.bind_item_font(pb_, self.big)
+                        with dpg.group(horizontal=True):
+                            pb_ = dpg.add_button(label="Pick & Place", width=(LEFT_W - sc(38)) * 2 // 3, height=sc(40),
+                                                 tag="b_pick", callback=lambda: self.req.append("pick"))
+                            dpg.bind_item_theme(pb_, th_primary)
+                            if self.big:
+                                dpg.bind_item_font(pb_, self.big)
+                            dpg.add_text("to zone")
+                            dpg.add_combo(("1", "2", "3"), default_value="1", tag="cb_zone", width=-1)
                         with dpg.group(horizontal=True):
                             for lab, tag, r in (("Home", "b_home", "home"), ("Recalibrate", "b_recal", "recal")):
                                 bb = dpg.add_button(label=lab, width=(LEFT_W - sc(38)) // 2 if r == "home" else -1,
-                                                    height=sc(34), tag=tag, callback=lambda s, a, u: self.req.append(u),
+                                                    height=sc(30), tag=tag, callback=lambda s, a, u: self.req.append(u),
                                                     user_data=r)
                                 dpg.bind_item_theme(bb, th_ghost)
                         with dpg.group(horizontal=True):
                             dpg.add_text("Speed", color=MUTED)
                             dpg.add_slider_float(tag="sl_speed", min_value=0.25, max_value=4.0, default_value=1.0,
                                                  format="%.2fx", width=-1, callback=self.on_speed)
-                    with dpg.child_window(width=LEFT_W, height=sc(340), no_scrollbar=True):
-                        title("Last run")
-                        dpg.add_text("-", tag="r_outcome", color=MUTED)
-                        if self.big:
-                            dpg.bind_item_font("r_outcome", self.big)
-                        for lab, tag in (("True pose", "r_true"), ("Estimated", "r_est"), ("Error", "r_err"),
-                                         ("Tag IDs seen", "r_tags"), ("Grasp", "r_grasp"), ("Place error", "r_place")):
-                            kv(lab + ":", tag)
-                        dpg.add_spacer(height=sc(2))
-                        with dpg.child_window(width=-1, height=-1, border=False):
-                            with dpg.table(tag="t_hist", header_row=True, row_background=True, borders_innerH=True,
-                                           policy=dpg.mvTable_SizingStretchProp, scrollY=True, height=-1):
-                                for c_ in ("Run", "Outcome", "Pos mm", "Place mm"):
-                                    dpg.add_table_column(label=c_)
-                    with dpg.child_window(width=LEFT_W, height=sc(172), no_scrollbar=True):
-                        title("Calibration")
-                        kv("Source:", "c_src")
-                        kv("Intrinsics RMS:", "c_rms")
-                        kv("T_base_cam error:", "c_ext")
-                        dpg.add_progress_bar(tag="c_bar", width=-1, height=sc(22), overlay="")
+                    with dpg.child_window(width=LEFT_W, height=sc(214), no_scrollbar=True):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("CONVEYOR", color=ACCENT)
+                            dpg.add_spacer(width=sc(8))
+                            dpg.add_text("stopped", tag="belt_state", color=MUTED)
+                            dpg.add_spacer(width=sc(8))
+                            dpg.add_text("(?) how it works", color=AMBER, tag="belt_help")
+                            with dpg.tooltip("belt_help"):
+                                dpg.add_text(BELT_HELP, wrap=sc(340))
+                        dpg.add_separator()
+                        dpg.add_text("Start belt, set the speed, Feed puts the chosen cube on the belt start. Tick 'Pick from "
+                                     "belt' to catch it into a zone. Or say: put the red cube on the belt and catch it into zone 2.",
+                                     wrap=LEFT_W - sc(30), color=MUTED)
+                        with dpg.group(horizontal=True):
+                            bb = dpg.add_button(label="Start belt", tag="b_belt", width=sc(104), height=sc(28),
+                                                callback=self.on_belt_toggle)
+                            dpg.bind_item_theme(bb, th_primary)
+                            dpg.add_slider_float(tag="sl_belt", min_value=0.0, max_value=6.0, format="%.1f cm/s", width=-1,
+                                                 default_value=100 * (self.belt.speed if self.belt else 0.03),
+                                                 callback=self.on_belt_speed)
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Feed", color=MUTED)
+                            dpg.add_combo(tuple(self.names[n] for n in self.names), default_value=self.names[1], tag="cb_feed",
+                                          width=sc(86))
+                            bf = dpg.add_button(label="Feed cube", tag="b_feed", width=-1, height=sc(28), callback=self.on_feed)
+                            dpg.bind_item_theme(bf, th_ghost)
+                        with dpg.group(horizontal=True):
+                            dpg.add_checkbox(label="Pick from belt to zone", tag="ck_beltpick", default_value=False)
+                            dpg.add_combo(("1", "2", "3"), default_value="1", tag="cb_beltzone", width=-1)
                 # ================= right column
                 with dpg.group():
-                    with dpg.child_window(width=-1, height=CAM_H + sc(60), no_scrollbar=True):
+                    with dpg.child_window(width=-1, height=CAM_H + sc(56), no_scrollbar=True):
                         title("Camera - C270 (simulated)")
                         dpg.add_image("tex_cam", width=CAM_W, height=CAM_H)
-                    with dpg.child_window(width=-1, height=sc(410), no_scrollbar=True):
+                    with dpg.child_window(width=-1, height=sc(176), no_scrollbar=True):
+                        title("Last run")
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("-", tag="r_outcome", color=MUTED)
+                            if self.big:
+                                dpg.bind_item_font("r_outcome", self.big)
+                            dpg.add_spacer(width=sc(14))
+                            dpg.add_text("", tag="r_grasp", color=MUTED)
+                        with dpg.group(horizontal=True):
+                            with dpg.group():
+                                kv("True pose:", "r_true")
+                                kv("Estimated:", "r_est")
+                            dpg.add_spacer(width=sc(18))
+                            with dpg.group():
+                                kv("Pose error:", "r_err")
+                                kv("Place error:", "r_place")
+                        dpg.add_text("", tag="belt_info", wrap=sc(540), color=(190, 198, 214))
+                    with dpg.child_window(width=-1, height=sc(262), no_scrollbar=True):
                         with dpg.group(horizontal=True):
                             dpg.add_text("KINEMATICS", color=ACCENT)
                             dpg.add_spacer(width=sc(10))
@@ -454,6 +620,13 @@ class App:
                             dpg.add_spacer(width=sc(10))
                             dpg.add_text("", tag="t_fps", color=MUTED)
                         dpg.add_separator()
+        with dpg.item_handler_registry(tag="mic_handlers"):
+            dpg.add_item_activated_handler(callback=lambda: self.mic_press("button"))
+            dpg.add_item_deactivated_handler(callback=lambda: self.mic_release("button"))
+        dpg.bind_item_handler_registry("b_mic", "mic_handlers")
+        with dpg.handler_registry():
+            dpg.add_key_down_handler(dpg.mvKey_Spacebar, callback=lambda: self.mic_press("key"))
+            dpg.add_key_release_handler(dpg.mvKey_Spacebar, callback=lambda: self.mic_release("key"))
         dpg.create_viewport(title="XarmAI - Pick & Place (Simulation)", width=VP_W, height=VP_H,
                             x_pos=PB_W + 24, y_pos=0, vsync=False)
         dpg.setup_dearpygui()
@@ -468,21 +641,119 @@ class App:
     def set_busy(self, busy):
         self.busy = busy
         can_calib = self.calib["state"] != "running"
-        dpg.configure_item("b_pick", enabled=(not busy) and self.calibrated() and can_calib)
+        ok = (not busy) and self.calibrated() and can_calib
+        dpg.configure_item("b_pick", enabled=ok)
+        dpg.configure_item("b_run", enabled=ok)
         dpg.configure_item("b_home", enabled=not busy)
+        for t in ("b_belt", "sl_belt", "b_feed", "cb_feed", "ck_beltpick", "cb_beltzone"):
+            dpg.configure_item(t, enabled=(not busy) and (self.belt is not None) and (ok or t in ("b_belt", "sl_belt")))
         dpg.configure_item("b_recal", enabled=(not busy) and can_calib)
+        for t in ("b_rand", "b_centre", "b_layout"):
+            dpg.configure_item(t, enabled=not busy)
+        if not busy:
+            dpg.configure_item("b_stop", enabled=False)
 
     def calibrated(self):
         return self.P.K is not None
 
-    def slider_vals(self):
-        return (dpg.get_value("sl_x") / 1000.0, dpg.get_value("sl_y") / 1000.0, math.radians(dpg.get_value("sl_w")))
+    def state_tuple(self, n):
+        c = self.cs[n]
+        return (c["x"] / 1000.0, c["y"] / 1000.0, math.radians(c["yaw"]))
 
     def on_slider(self):
-        pass
+        """Sliders act on the selected cube."""
+        c = self.cs[self.sel]
+        c["x"], c["y"], c["yaw"] = float(dpg.get_value("sl_x")), float(dpg.get_value("sl_y")), float(dpg.get_value("sl_w"))
+
+    def sync_cube_widgets(self):
+        """Selected cube -> sliders, swatch highlight, label; enabled flags -> checkboxes."""
+        c = self.cs[self.sel]
+        dpg.set_value("sl_x", float(np.clip(c["x"], *self.bx)))
+        dpg.set_value("sl_y", float(np.clip(c["y"], *self.by)))
+        dpg.set_value("sl_w", float(c["yaw"]))
+        dpg.set_value("t_sel", "Sliders move: %s cube%s" % (self.names[self.sel],
+                                                           "" if c["on"] else "  (not in scene)"))
+        for n in self.names:
+            dpg.bind_item_theme("cb_%d" % n, self.cube_th[n][n == self.sel])
+            dpg.set_value("ck_%d" % n, self.cs[n]["on"])
+
+    def on_select(self, sender, app_data, user_data):
+        self.sel = int(user_data)
+        self.sync_cube_widgets()
+
+    def on_toggle(self, sender, app_data, user_data):
+        self.req.append(("toggle", int(user_data), bool(app_data)))
+
+    def set_cube_state(self, n, x_m, y_m, yaw_deg):
+        c = self.cs[n]
+        c["x"], c["y"], c["yaw"] = 1000 * x_m, 1000 * y_m, float(yaw_deg)
+        if n == self.sel:
+            self.sync_cube_widgets()
+
+    def cubes_from_world(self):
+        """After robot motion: copy the (physics) cube poses into the slider state so nothing snaps back."""
+        for n, body in self.w.cubes.items():
+            T = self.w.cube_pose_true(n)
+            c = self.cs[n]
+            c["x"], c["y"], c["yaw"] = 1000 * T[0, 3], 1000 * T[1, 3], math.degrees(sd.cube_yaw(T))
+            self.applied[n] = self.state_tuple(n)
 
     def on_speed(self):
         self.w.speed = float(dpg.get_value("sl_speed"))
+
+    # ------------------------------------------------------------ conveyor
+    def on_belt_toggle(self):
+        if self.belt is None or self.busy:
+            return
+        self.belt.running = not self.belt.running
+        self.t_belt = time.perf_counter()
+        self.tee("[belt] %s at %.1f cm/s" % ("running" if self.belt.running else "stopped", 100 * self.belt.speed))
+
+    def on_belt_speed(self):
+        if self.belt is None or self.busy:
+            return
+        self.belt.set_speed(float(dpg.get_value("sl_belt")) / 100.0)
+
+    def on_feed(self):
+        if self.belt is None or self.busy:
+            return
+        inv = {v: k for k, v in self.names.items()}
+        n = inv[dpg.get_value("cb_feed")]
+        auto = bool(dpg.get_value("ck_beltpick"))
+        zone = int(dpg.get_value("cb_beltzone"))
+        self.req.append(("feed", n, auto, zone))
+
+    def do_feed(self, n, auto, zone):
+        tasks = [cmd_mod.Task("feed", n, text="Feed button")]
+        if auto:
+            tasks.append(cmd_mod.Task("pick_belt", n, zone=zone, text="Feed button (auto-pick)"))
+        self.task_rows = [[t.describe(self.names), "queued", ""] for t in tasks]
+        self.refresh_tasks()
+        dpg.set_value("cmd_echo", "Understood: " + "; ".join("%d) %s" % (i + 1, t.describe(self.names)) for i, t in enumerate(tasks)))
+        dpg.configure_item("cmd_echo", show=True)
+        dpg.configure_item("cmd_err", show=False)
+        self.do_command(tasks, "Feed button", "button")
+
+    def belt_idle_advance(self, now):
+        """Idle belt animation: sim time follows wall time (x playback speed) while nothing else moves."""
+        b = self.belt
+        dt_wall = min(now - self.t_belt, 0.1)
+        self.t_belt = now
+        if b is None or not b.running or b.v <= 0.0:
+            return
+        self.belt_acc += dt_wall * 240.0 * self.w.speed
+        k = int(self.belt_acc)
+        if k <= 0:
+            return
+        self.belt_acc -= k
+        self.w.advance_fast(k)
+        self.cubes_from_world()
+        sel = self.cs[self.sel]
+        if self.sel in self.w.cubes and b.cfg.from_world(sel["x"] / 1000, sel["y"] / 1000)[0] > -0.02 and abs(
+                b.cfg.from_world(sel["x"] / 1000, sel["y"] / 1000)[1]) < b.cfg.width:
+            self.sync_cube_widgets()
+        self.cam_frozen = False
+        self.cam_dirty = True
 
     # ------------------------------------------------------------ live widgets
     def update_live(self, now):
@@ -509,6 +780,10 @@ class App:
                        ("k_g", "%.1f%s" % (g, DEG))):
             dpg.set_value(tag, v)
         dpg.set_value("k_phase", self.P.phase)
+        if self.belt is not None:
+            self._val("belt_state", ("running %.1f cm/s" % (100 * self.belt.speed)) if self.belt.running else "stopped")
+            self._cfg("b_belt", label="Stop belt" if self.belt.running else "Start belt")
+            self._val("sl_belt", 100 * self.belt.speed)
         self.hist_q.append((now, list(q)))
         if now - self.t_plot > 0.2:
             self.t_plot = now
@@ -544,12 +819,13 @@ class App:
         self.w.set_arm(sd.S["park_q"])       # apply_calib leaves the arm at ready; idle pose = park
         intr, ext = d["intr"], d["ext"]
         dpg.set_value("c_src", "cache, %s" % d["timestamp"] if source == "cache" else "fresh, %s" % d["timestamp"])
-        dpg.set_value("c_rms", "%.3f px  (%d views)" % (intr["rms"], intr["views"]))
-        dpg.set_value("c_ext", "%.1f mm / %.2f%s  (%d poses)" % (ext["cam_pos_mm"], ext["cam_rot_deg"], DEG,
-                                                                 ext["poses"]))
+        dpg.set_value("c_rms", "| RMS %.3f px (%d views)" % (intr["rms"], intr["views"]))
+        dpg.set_value("c_ext", "| T_base_cam err %.1f mm / %.2f%s (%d poses)" % (ext["cam_pos_mm"], ext["cam_rot_deg"], DEG,
+                                                                                ext["poses"]))
         dpg.set_value("c_bar", 1.0)
         dpg.configure_item("c_bar", overlay="calibrated")
         self.ready_t = time.perf_counter() - _T_IMPORT0
+        self.ready_abs = time.perf_counter()
         self.tee("[app] calibration %s ready (%s)" % (source, d["timestamp"]))
         self.set_busy(False)
 
@@ -614,28 +890,70 @@ class App:
 
     # ------------------------------------------------------------ actions
     def cube_follow(self):
-        cur = self.slider_vals()
-        if cur != self.applied:
-            self.w.set_cube_pose(cur[0], cur[1], cur[2], settle=0)
-            self.applied = cur
+        moved = False
+        for n, c in self.cs.items():
+            if not c["on"] or n not in self.w.cubes:
+                continue
+            cur = self.state_tuple(n)
+            if cur != self.applied.get(n):
+                self.R.put_cube(n, cur[0], cur[1], cur[2], settle=0)
+                self.applied[n] = cur
+                moved = True
+        if moved:
             self.cam_frozen = False
             self.cam_dirty = True
             if self.status in ("Done", "Failed") and self.calibrated():
                 self.set_status("Ready")
 
-    def set_sliders(self, x, y, yaw_deg):
-        dpg.set_value("sl_x", float(np.clip(1000 * x, *self.bx)))
-        dpg.set_value("sl_y", float(np.clip(1000 * y, *self.by)))
-        dpg.set_value("sl_w", float(yaw_deg))
+    def enabled(self):
+        return [n for n, c in self.cs.items() if c["on"]]
+
+    def toggle_cube(self, n, on):
+        self.cs[n]["on"] = on
+        if on:
+            self.R.put_cube(n, *self.state_tuple(n))
+            self.applied[n] = self.state_tuple(n)
+        else:
+            self.R.remove_cube(n)
+            self.applied.pop(n, None)
+        self.sync_cube_widgets()
+        self.cam_frozen = False
+        self.cam_dirty = True
+
+    def random_pose_for(self, n):
+        """Random pose for cube n keeping the minimum centre spacing to the other cubes in the scene."""
+        others = [(self.cs[k]["x"] / 1000, self.cs[k]["y"] / 1000) for k in self.enabled() if k != n]
+        for _ in range(200):
+            x, y, yaw = self.P.sample_cube()
+            if all(math.hypot(x - ox, y - oy) >= TM["cube_min_spacing_m"] for ox, oy in others):
+                return x, y, yaw
+        return x, y, yaw
 
     def handle(self, r):
         if self.busy:
             return
+        if isinstance(r, tuple):
+            if r[0] == "toggle":
+                self.toggle_cube(r[1], r[2])
+            elif r[0] == "cmd":
+                if self.calibrated() and self.calib["state"] != "running":
+                    self.do_command(*r[1:])
+            elif r[0] == "feed":
+                if self.calibrated() and self.calib["state"] != "running":
+                    self.do_feed(*r[1:])
+            return
         if r == "random":
-            x, y, yaw = self.P.sample_cube()
-            self.set_sliders(x, y, math.degrees(yaw))
+            x, y, yaw = self.random_pose_for(self.sel)
+            self.set_cube_state(self.sel, x, y, math.degrees(yaw))
         elif r == "centre":
-            self.set_sliders(0.5 * sum(self.bx) / 1000, 0.5 * sum(self.by) / 1000, 0.0)
+            self.set_cube_state(self.sel, 0.5 * sum(self.bx) / 1000, 0.5 * sum(self.by) / 1000, 0.0)
+        elif r == "layout":
+            lay = self.R.random_layout(self.enabled(), self.P.rng)
+            if lay is None:
+                self.tee("[layout] the enabled cubes do not fit with the %.0f mm minimum spacing" % (1000 * TM["cube_min_spacing_m"]))
+            else:
+                for n, (x, y, yaw) in lay.items():
+                    self.set_cube_state(n, x, y, math.degrees(yaw))
         elif r == "home":
             self.do_home()
         elif r == "recal":
@@ -653,9 +971,6 @@ class App:
             self.w.detach_cube()
             self.w.move_gripper(0.0, name="home_open")
             self.w.move_joints(self.w.arm_q(), sd.S["park_q"], name="home")
-            cur = self.slider_vals()
-            self.w.set_cube_pose(*cur, settle=0)
-            self.applied = cur
         finally:
             self.P.phase = "idle"
             self.set_busy(False)
@@ -663,18 +978,33 @@ class App:
         self.cam_frozen = False
         self.cam_dirty = True
 
+    def after_motion(self):
+        self.P.phase = "idle"
+        dpg.set_value("k_phase", "idle")
+        for n in self.names:                                  # cubes fed / removed by the conveyor tasks
+            self.cs[n]["on"] = n in self.w.cubes
+        self.cubes_from_world()
+        self.sync_cube_widgets()
+        self.cam_frozen = True
+
     def do_pick(self):
+        """Pick the selected cube and place it in the zone chosen next to the button (default zone 1)."""
+        n = self.sel
+        if n not in self.w.cubes:
+            self.tee("[pick] %s cube is not in the scene (tick 'in scene')" % self.names[n])
+            return
+        zone = int(dpg.get_value("cb_zone"))
         self.set_busy(True)
         self.set_status("Running")
-        cur = self.slider_vals()
+        cur = self.state_tuple(n)
         self.k += 1
-        self.tee("--- run %d: cube x=%.0f y=%.0f mm yaw=%.0f%s ---" % (self.k, 1000 * cur[0], 1000 * cur[1],
-                                                                     math.degrees(cur[2]), DEG))
+        self.tee("--- run %d: %s cube x=%.0f y=%.0f mm yaw=%.0f%s -> zone %d ---" % (
+            self.k, self.names[n], 1000 * cur[0], 1000 * cur[1], math.degrees(cur[2]), DEG, zone))
         self.step_n, self.run_t0 = 0, time.perf_counter()
         self.t_render = self.t_live_cost = 0.0
         rec = None
         try:
-            rec = self.P.run_one(self.k, self.P.close_ang, cur, respawn=False)
+            rec = self.R.run_task(cmd_mod.Task("place", n, zone=zone, text="Pick & Place"), self.k, "Pick & Place button")
         except (sd.UserStop, pb.error):
             self.P.phase = "idle"
             dpg.set_value("k_phase", "idle")
@@ -686,18 +1016,296 @@ class App:
                 self.w.detach_cube()
             except Exception:
                 pass
-        self.P.phase = "idle"
-        dpg.set_value("k_phase", "idle")
         dt = time.perf_counter() - self.run_t0
         self.tee("[perf] run %.1fs, %d sim steps (%.0f steps/s), UI %.0f fps, dpg render %.1fs, widget upd %.1fs" % (
             dt, self.step_n, self.step_n / max(dt, 1e-6), self.fps, self.t_render, self.t_live_cost))
-        self.applied = cur
-        self.cam_frozen = True
+        self.after_motion()
         self.show_result(rec)
         self.set_busy(False)
         self.test_result = rec["outcome"] if rec else "ERROR"
 
-    def show_result(self, rec):
+    # ------------------------------------------------------------ commands (text now, voice later)
+    def on_cmd_enter(self):
+        self.submit_command(dpg.get_value("cmd_in"), "text")
+
+    def on_stop(self):
+        self.cmd_stop = True
+        dpg.configure_item("b_stop", enabled=False)
+        self.tee("[command] stop requested: the current task finishes, the rest is skipped")
+
+    def intent_context(self):
+        b = self.belt
+        return intent_mod.Context(dict(self.names), tuple(self.R.zone_numbers), set(self.R.in_scene()),
+                                  bool(b and b.running), 100.0 * (b.speed if b else 0.0))
+
+    def start_brain_check(self):
+        def work():
+            try:
+                ok, txt = self.intent.status()
+            except Exception as e:
+                ok, txt = False, "Brain check failed (%s) - rules only" % type(e).__name__
+            self.brain = (txt, GREEN if ok else AMBER)
+            self.tee("[brain] " + txt)
+            if ok:
+                self.intent.warm()                            # load the model now so the first command is fast
+        threading.Thread(target=work, daemon=True).start()
+
+    def say(self, text):
+        """Speak (if 'Speak replies' is ticked); never blocks."""
+        if text:
+            tts.speak(text)
+
+    def submit_command(self, text, source="text"):
+        """Entry point for typed AND spoken commands. While a proposal waits for confirmation a yes / no reply answers it;
+        anything else is a new command. Understanding (rules, then the optional local LLM) runs in a worker thread; the
+        result comes back through poll_think(). Nothing moves until the tasks are queued (typed + fully understood by
+        the rules, or confirmed)."""
+        text = (text or "").strip()
+        if self.pending is not None:
+            r = intent_mod.classify_reply(text)
+            if r == "yes":
+                self.tee("[command/%s] %r -> confirmed" % (source, text))
+                self.confirm_pending()
+                return True
+            if r == "no":
+                self.tee("[command/%s] %r -> cancelled" % (source, text))
+                self.cancel_pending("OK, cancelled")
+                return False
+            self.clear_pending()                                  # a new / corrected command replaces the old proposal
+        if not text:
+            return False
+        if source != "text":
+            dpg.set_value("cmd_in", text)
+        self.show_parse(cmd_mod.ParseResult())
+        self.thinking += 1
+        dpg.configure_item("cmd_think", show=True)
+        ctx = self.intent_context()
+
+        def work():
+            try:
+                prop = self.intent.understand(text, ctx, from_voice=(source == "voice"))
+            except Exception as e:                                # never let a worker bug kill the app
+                prop = intent_mod.Proposal(errors=["understanding failed: %s: %s" % (type(e).__name__, e)])
+            self.think_q.append((prop, text, source))
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def poll_think(self):
+        while self.think_q:
+            prop, text, source = self.think_q.popleft()
+            self.thinking = max(0, self.thinking - 1)
+            dpg.configure_item("cmd_think", show=self.thinking > 0)
+            self.tee("[command/%s] %r -> %s [%s]%s%s" % (
+                source, text, prop.echo or "-", prop.source, ("  SAY: " + prop.say) if prop.say else "",
+                ("  ERRORS: " + "; ".join(prop.errors)) if prop.errors else ""))
+            if prop.raw is not None:
+                self.tee("[ai] raw %s" % prop.raw)
+            if self.thinking > 0:
+                continue                                          # a newer command is already being understood
+            if not prop.ok:
+                self.show_parse(cmd_mod.ParseResult(errors=prop.errors or ([] if prop.say else ["did not understand '%s'" % text])))
+                if prop.say:
+                    dpg.set_value("cmd_echo", prop.say)
+                    dpg.configure_item("cmd_echo", show=True)
+                    self.say(prop.say)
+                if self.test and prop.errors:
+                    self.test_result = "NOPARSE"
+                continue
+            if prop.needs_confirm:
+                self.pending = (prop, text, source)
+                self.show_parse(cmd_mod.ParseResult())
+                tag = {"ollama": "  [AI guess]", "fuzzy": "  [spelling fix]"}.get(prop.source, "")
+                dpg.set_value("confirm_q", prop.question + tag + "\nSay or press Yes / No.")
+                dpg.configure_item("confirm_box", show=True)
+                self.say(prop.question)
+                continue
+            self.show_parse(cmd_mod.ParseResult(tasks=prop.tasks, echo=prop.echo))
+            self.queue_tasks(prop.tasks, text, source)
+
+    def clear_pending(self):
+        self.pending = None
+        dpg.configure_item("confirm_box", show=False)
+
+    def cancel_pending(self, msg="OK, cancelled"):
+        self.clear_pending()
+        self.show_parse(cmd_mod.ParseResult())
+        dpg.set_value("cmd_echo", msg)
+        dpg.configure_item("cmd_echo", show=True)
+        self.say(msg)
+
+    def confirm_pending(self):
+        prop, text, source = self.pending
+        self.clear_pending()
+        self.show_parse(cmd_mod.ParseResult(tasks=prop.tasks, echo=prop.echo))
+        self.queue_tasks(prop.tasks, text, source)
+
+    def queue_tasks(self, tasks, text, source):
+        if self.busy or not self.calibrated() or self.calib["state"] == "running":
+            dpg.set_value("cmd_err", "busy or not calibrated - command not started")
+            dpg.configure_item("cmd_err", show=True)
+            return False
+        self.task_rows = [[t.describe(self.names), "queued", ""] for t in tasks]
+        self.refresh_tasks()
+        self.req.append(("cmd", tasks, text, source))
+        return True
+
+    # ------------------------------------------------------------ voice (push-to-talk)
+    def _cfg(self, tag, **kw):
+        """configure_item only when something changed (skips redundant dpg calls: fps)."""
+        key = tuple(sorted(kw.items()))
+        if self._ui_cache.get(("c", tag, tuple(sorted(kw)))) != key:
+            self._ui_cache[("c", tag, tuple(sorted(kw)))] = key
+            dpg.configure_item(tag, **kw)
+
+    def _val(self, tag, v):
+        k = ("v", tag)
+        if self._ui_cache.get(k) != v:
+            self._ui_cache[k] = v
+            dpg.set_value(tag, v)
+
+    def mic_can_record(self):
+        v = self.voice
+        return v.mic_ok and v.ready and not self.busy and self.calibrated() and self.calib["state"] != "running"
+
+    def mic_press(self, src):
+        if self.voice_state != "idle" or not self.mic_can_record():
+            return
+        if src == "key" and (dpg.is_item_active("cmd_in") or dpg.is_item_focused("cmd_in")):
+            return                                         # typing a space in the text box
+        if self.voice.start_recording():
+            self.voice_state, self.mic_src = "listening", src
+            self.tee("[voice] listening (%s) ..." % src)
+
+    def mic_release(self, src):
+        if self.voice_state != "listening" or src != self.mic_src:
+            return
+        self.finish_recording(self.voice.stop_recording())
+
+    def finish_recording(self, audio):
+        """audio (float32 mono 16 kHz) -> worker-thread transcription; the result comes back through self.voice_q."""
+        if len(audio) < 0.3 * 16000:
+            self.voice_state = "idle"
+            self.voice_heard = "Too short - hold the button while you speak"
+            return
+        self.voice_state = "transcribing"
+        self.voice.transcribe_async(audio, lambda text, info, err: self.voice_q.append((text, info, err)))
+
+    def poll_voice(self):
+        while self.voice_q:
+            text, info, err = self.voice_q.popleft()
+            self.voice_state = "idle"
+            if err:
+                self.voice_heard = "Voice error: %s" % err[:80]
+                continue
+            if not text:
+                self.voice_heard = "Heard: (nothing recognised)"
+                self.tee("[voice] heard nothing")
+                continue
+            self.voice_heard = 'Heard: "%s"   (%.2f s, %s)' % (text, info.get("seconds", 0.0), self.voice.device.split()[0])
+            self.tee("[voice] heard %r (%.2f s for %.1f s audio, %s)" % (text, info.get("seconds", 0), info.get("audio_s", 0),
+                                                                     info.get("device", "")))
+            self.submit_command(text, source="voice")         # voice ALWAYS goes through "Did you mean ...?" (or answers it)
+
+    def update_voice_ui(self):
+        v = self.voice
+        listening = self.voice_state == "listening"
+        if listening and v.timed_out:
+            self.mic_release(self.mic_src)
+            listening = False
+        ok = self.mic_can_record() or listening
+        self._cfg("b_mic", enabled=ok)
+        if not v.mic_ok:
+            tip = v.mic_error or "no microphone"
+        elif v.status == "error":
+            tip = "Voice model failed: " + v.error
+        elif not v.ready:
+            tip = "Voice model is loading ..."
+        elif self.busy:
+            tip = "Disabled while a task is running"
+        elif not self.calibrated():
+            tip = "Disabled until calibration is done"
+        else:
+            tip = "Hold, speak, release (or hold SPACE). Offline faster-whisper; the app asks Did you mean ... and acts after yes."
+        self._val("mic_tip", tip)
+        self._cfg("b_mic", label="🎤 Release to send" if listening else MIC_IDLE)
+        if listening:
+            txt, col = "Listening...  %.1f / %.0f s" % (v.rec_seconds(), MAX_RECORD_S), AMBER
+        elif self.voice_state == "transcribing":
+            txt, col = "Transcribing...", ACCENT
+        elif not v.mic_ok:
+            txt, col = "Voice: no microphone", RED
+        else:
+            txt, col = v.status_text(), (GREEN if v.ready else (RED if v.status == "error" else MUTED))
+        self._cfg("v_level", overlay=txt)
+        self._val("v_level", float(v.level) if listening else 0.0)
+        self._val("v_heard", self.voice_heard)
+        self._val("brain_line", self.brain[0] or "Brain: checking ...")
+        self._cfg("v_heard", show=bool(self.voice_heard))
+
+    def show_parse(self, res):
+        dpg.set_value("cmd_echo", ("Understood: " + res.echo) if res.echo else "")
+        dpg.set_value("cmd_err", "\n".join(res.errors))
+        dpg.configure_item("cmd_err", show=bool(res.errors))
+        dpg.configure_item("cmd_echo", show=bool(res.echo))
+
+    def refresh_tasks(self):
+        dpg.delete_item("t_task", children_only=True, slot=1)
+        for i, (txt, st, err) in enumerate(self.task_rows, 1):
+            with dpg.table_row(parent="t_task"):
+                dpg.add_text(str(i), color=MUTED)
+                dpg.add_text(txt, wrap=sc(190))
+                dpg.add_text(st, color=TASK_COL.get(st, TEXT))
+                dpg.add_text(err, color=MUTED)
+
+    def do_command(self, tasks, text, source="text"):
+        self.set_busy(True)
+        self.set_status("Running")
+        self.cmd_stop = False
+        dpg.configure_item("b_stop", enabled=True)
+        self.step_n, self.run_t0 = 0, time.perf_counter()
+
+        def on_status(i, state, rec):
+            if 1 <= i <= len(self.task_rows):
+                row = self.task_rows[i - 1]
+                row[1] = state
+                if rec and rec.get("place_err_mm", "") != "":
+                    row[2] = "%.1f" % rec["place_err_mm"]
+                elif rec and rec.get("detail"):
+                    row[2] = "-"
+                if state == "queued":
+                    pass
+                self.refresh_tasks()
+            if rec is not None and state in ("done", "failed"):
+                self.show_result(rec)
+            if state == "running":
+                self.tee("--- task %d/%d: %s ---" % (i, len(tasks), self.task_rows[i - 1][0]))
+        recs = []
+        try:
+            recs = self.R.execute(tasks, text, on_status=on_status, should_stop=lambda: self.cmd_stop)
+        except (sd.UserStop, pb.error):
+            self.P.phase = "idle"
+            dpg.set_value("k_phase", "idle")
+            raise
+        except Exception as e:
+            self.tee("[command] ERROR %s: %s" % (type(e).__name__, e))
+            self.tee(traceback.format_exc().splitlines()[-2][:150])
+            try:
+                self.w.detach_cube()
+            except Exception:
+                pass
+        for j in range(len(recs), len(self.task_rows)):        # tasks never reached (stopped)
+            if self.task_rows[j][1] in ("queued", "running"):
+                self.task_rows[j][1] = "skipped"
+        self.refresh_tasks()
+        self.after_motion()
+        ok = bool(recs) and all(r.get("outcome") == "SUCCESS" for r in recs) and len(recs) == len(tasks)
+        self.tee("[command] done: %d/%d tasks SUCCESS (%.1f s)" % (
+            sum(r.get("outcome") == "SUCCESS" for r in recs), len(tasks), time.perf_counter() - self.run_t0))
+        self.set_busy(False)
+        self.set_status("Done" if ok else "Failed")
+        self.test_result = "SUCCESS" if ok else "FAIL"
+
+    def show_result(self, rec, history_only=False):
         if rec is None:
             self.set_status("Failed")
             dpg.set_value("r_outcome", "ERROR")
@@ -716,22 +1324,22 @@ class App:
         else:
             dpg.set_value("r_est", "-")
             dpg.set_value("r_err", "-")
-        dpg.set_value("r_tags", ("id " + rec["tags"].replace(",", ", id ")) if rec["tags"] else "none")
         if rec.get("chosen_id"):
             dpg.set_value("r_grasp", "%s  yaw %.0f%s  (rank %s, %s feasible)" % (
                 rec["chosen_id"], rec["chosen_yaw_deg"], DEG, rec["chosen_rank"], rec["feasible"]))
         else:
             dpg.set_value("r_grasp", "-")
         dpg.set_value("r_place", ("%.1f mm" % rec["place_err_mm"]) if rec["place_err_mm"] != "" else "-")
+        if rec.get("detail"):
+            dpg.set_value("r_grasp", rec["detail"][:70])
+        if rec.get("belt_v_est_mm_s") is not None:
+            dpg.set_value("belt_info", "Belt: v_est %.1f +- %.1f (true %.1f) mm/s | %d/%d frames | contact %s mm | grasp %s mm" % (
+                rec["belt_v_est_mm_s"], rec["belt_sigma_v_mm_s"], rec["belt_v_true_mm_s"], rec["belt_frames_used"],
+                rec["belt_frames"], ("%.1f" % rec["belt_track_err_mm"]) if rec.get("belt_track_err_mm") not in (None, "") else "-",
+                ("%.1f" % rec["grasp_offset_mm"]) if rec.get("grasp_offset_mm") not in (None, "") else "-"))
         self.hist.insert(0, rec)
-        dpg.delete_item("t_hist", children_only=True, slot=1)
-        for r in self.hist[:30]:
-            with dpg.table_row(parent="t_hist"):
-                dpg.add_text(str(r["run"]))
-                dpg.add_text(r["outcome"], color=GREEN if r["outcome"] == "SUCCESS" else RED)
-                dpg.add_text(f1(r["pos_err_mm"]))
-                dpg.add_text(f1(r["place_err_mm"]))
-        self.set_status("Done" if ok else "Failed")
+        if not self.busy:
+            self.set_status("Done" if ok else "Failed")
 
     # ------------------------------------------------------------ screenshots (test hook)
     def take_shots(self, name):
@@ -750,6 +1358,8 @@ class App:
         except Exception as e:
             self.tee("[shot] 3d failed %s" % e)
         try:
+            if os.environ.get("XARM_APP_TEST_VOICE") or os.environ.get("XARM_APP_NO_SCREEN"):
+                raise RuntimeError("full-desktop capture disabled for the voice test (dpg + 3d only)")
             from PIL import ImageGrab
             ImageGrab.grab(all_screens=True).save(os.path.join(self.shots, name + "_screen.png"))
         except Exception as e:
@@ -782,20 +1392,70 @@ class App:
         if s == 0 and self.calib["state"] == "running" and not self.shot0 and now - self.t_start > 12:
             self.shot0 = True
             self.take_shots("00_calibrating")
+        if self.pending is not None and not self._shot_pending:
+            self._shot_pending = True
+            self.take_shots("02_confirm")
+            if self.autoconfirm:
+                self.tee("[test] XARM_APP_AUTOCONFIRM: confirming")
+                self.confirm_pending()
+        cmd_text = os.environ.get("XARM_APP_COMMAND") or (os.environ.get("XARM_APP_TEST_VOICE") and "voice")
         if s == 0:
             if self.calibrated() and self.calib["state"] != "running" and not self.busy:
                 self.test_t, self.test_stage = now, 1
-                self.set_sliders(0.38, 0.05, 25.0)
-        elif s == 1 and now - self.test_t > 1.5:
+                if cmd_text:
+                    nums = [int(v) for v in os.environ.get("XARM_APP_CUBES", "1,2,3").split(",")]
+                    for n in self.names:
+                        if (n in nums) != self.cs[n]["on"]:
+                            self.req.append(("toggle", n, n in nums))
+                    if os.environ.get("XARM_APP_BELT_IDLE") and self.belt is not None:      # test hook: belt running + a fed cube riding it (idle animation)
+                        self.belt.set_speed(float(os.environ["XARM_APP_BELT_IDLE"]) / 100.0)
+                        self.belt.running = True
+                        self.req.append(("feed", 1, False, 2))
+                    lay = os.environ.get("XARM_APP_LAYOUT")
+                    if lay:
+                        for n, t in zip(nums, lay.split(";")):
+                            x, y, yw = (float(v) for v in t.split(","))
+                            self.set_cube_state(n, x, y, yw)
+                    else:
+                        self.req.append("layout")
+                else:
+                    self.set_sliders(0.38, 0.05, 25.0)
+        elif s == 1 and now - self.test_t > (9.0 if os.environ.get("XARM_APP_BELT_IDLE") else 4.0) and not self.busy:
             self.tee("[perf] idle: UI %.0f fps, camera refresh %.0f ms per frame (4 Hz)" % (self.fps, self.cam_ms))
             self.take_shots("01_idle")
             self.test_stage = 2
-            self.req.append("pick")
+            if os.environ.get("XARM_APP_TEST_VOICE"):
+                self.test_stage = 5
+            elif cmd_text:
+                dpg.set_value("cmd_in", cmd_text)
+                self.submit_command(cmd_text, "text")
+            else:
+                self.req.append("pick")
+        elif s == 5 and self.voice.ready:
+            # voice test hook: feed the wav as if it was spoken (no microphone needed)
+            v = self.voice
+            self.voice_state, self.mic_src = "listening", "test"
+            v.recording, v.t_rec0, v.level = True, now - 2.4, 0.55
+            self.test_t, self.test_stage = now, 6
+        elif s == 6 and now - self.test_t > 0.6:
+            v = self.voice
+            self.take_shots("v1_listening")
+            v.recording, v.level = False, 0.0
+            audio = read_wav_16k(os.environ["XARM_APP_TEST_VOICE"])
+            self.tee("[test] feeding %s (%.1f s) as spoken audio" % (os.environ["XARM_APP_TEST_VOICE"], len(audio) / 16000))
+            self.finish_recording(audio)
+            self.test_t, self.test_stage = now, 7
+        elif s == 7 and self.voice_heard and self.voice_state == "idle":
+            self.take_shots("v2_heard")
+            self.test_stage = 2
         elif s == 2 and self.test_result is not None:
             self.test_t, self.test_stage = now, 3
         elif s == 3 and now - self.test_t > 1.0:
             self.take_shots("03_after_place")
             self.test_stage = 4
+
+    def set_sliders(self, x, y, yaw_deg):
+        self.set_cube_state(self.sel, x, y, yaw_deg)
 
     # ------------------------------------------------------------ main loop
     def run(self):
@@ -805,18 +1465,27 @@ class App:
                 now = time.perf_counter()
                 self.pump(force=True)
                 self.poll_calibration()
+                self.poll_voice()
+                self.poll_think()
                 while self.req:
                     self.handle(self.req.popleft())
                 if not self.busy:
+                    self.belt_idle_advance(now)
+                    tf = time.perf_counter()
                     self.cube_follow()
-                    if not self.cam_frozen and now - self.t_cam > 0.25 and (self.cam_dirty or now - self.t_cam > 2.0):
+                    self.prof["cube_follow"] += time.perf_counter() - tf
+                    if not self.cam_frozen and now - self.t_cam > 0.3 and (self.cam_dirty or now - self.t_cam > 5.0):
                         self.t_cam = now
                         self.cam_dirty = False
                         tg = time.perf_counter()
                         self.set_cam(self.preview())
                         self.cam_ms = 0.8 * self.cam_ms + 0.2 * 1000 * (time.perf_counter() - tg)
+                        self.prof["preview"] += time.perf_counter() - tg
+                        self.prof["n_preview"] += 1
                 if self.test:
                     self.test_tick(now)
+                    if self.test_result == "NOPARSE":
+                        return 2
                     if self.test_stage == 4:
                         return 0 if self.test_result == "SUCCESS" else 2
                     if now - self.t_start > 600:
@@ -824,11 +1493,39 @@ class App:
                         return 3
                 el = time.perf_counter() - tl
                 tl = time.perf_counter()
+                ts = time.perf_counter()
                 time.sleep(max(0.0, 1 / 60 - (time.perf_counter() - now)))
+                self.prof["sleep"] += time.perf_counter() - ts
+                self.prof["frames"] += 1
+                if PROFILE and self.ready_abs is not None and now < self.ready_abs + PROFILE_AFTER:
+                    self.prof.clear()
+                if PROFILE and self.ready_abs is not None and now > self.ready_abs + PROFILE_AFTER + PROFILE:
+                    self.report_profile()
+                    return 0
         except (sd.UserStop, pb.error) as e:
             if isinstance(e, pb.error) and "not connected" not in str(e).lower():
                 raise
         return 0
+
+    def report_profile(self):
+        cam = self.P.cam
+        tt = {"sync_aux": [], "getCameraImage": [], "convert+resize": []}
+        for _ in range(5):
+            t0 = time.perf_counter()
+            self.P.sync_aux()
+            t1 = time.perf_counter()
+            img = self.P.aux.p.getCameraImage(PREV_W, PREV_H, cam.view, cam.proj, renderer=pb.ER_TINY_RENDERER, shadow=0)[2]
+            t2 = time.perf_counter()
+            self.set_cam(cv2.cvtColor(np.asarray(img, np.uint8).reshape(PREV_H, PREV_W, 4)[:, :, :3], cv2.COLOR_RGB2BGR))
+            t3 = time.perf_counter()
+            for k, v in zip(tt, (t1 - t0, t2 - t1, t3 - t2)):
+                tt[k].append(1000 * v)
+        self.tee("[profile] preview parts ms: " + ", ".join("%s %.1f" % (k, np.mean(v)) for k, v in tt.items()) +
+                 "; cubes in world %s, aux %s" % (sorted(self.w.cubes), sorted(self.P.aux.cubes)))
+        n = max(1.0, self.prof["frames"])
+        self.tee("[profile] idle %d frames; ms/frame: %s; previews %d, preview ms %.1f; UI fps %.1f" % (
+            n, ", ".join("%s %.2f" % (k, 1000 * v / n) for k, v in self.prof.items() if k not in ("frames", "n_preview", "preview")),
+            self.prof["n_preview"], 1000 * self.prof["preview"] / max(1.0, self.prof["n_preview"]), self.fps))
 
     def close(self):
         self.cancel = True

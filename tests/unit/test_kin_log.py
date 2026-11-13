@@ -104,3 +104,23 @@ def test_run_log_files(world, tmp_path):
     assert log.summary["fd"] < 1e-6 and log.summary["fk_mm"] < 1e-3
     rows = open(csv_, encoding="utf-8").read().splitlines()
     assert rows[0].startswith("t_s,segment,phase,q1_rad") and len(rows) == 1 + log.segs[0].n
+
+
+def test_cartesian_qd_qdd_analytic_and_smooth(world):
+    """qd/qdd are analytic (J^+): match a smoothed finite-difference reference and have no step-to-step spikes."""
+    q0 = np.array([0.0, -0.3, -0.6, 0.9, 0.0])
+    T1 = world.fk_tcp(q0)
+    T1[2, 3] -= 0.08
+    q1, pe, _ = world.ik_refine(T1, q0)
+    seg = traj.plan_line("t", q0, q1, world.limits, world)
+    assert seg.kind == "cartesian-quintic"
+    h, dt = 20, seg.dt
+    x = np.arange(-h, h + 1) * dt
+    P2 = np.linalg.pinv(np.vander(x, 6, increasing=True))[2] * 2.0
+    P1 = np.linalg.pinv(np.vander(x, 6, increasing=True))[1]
+    for i in range(h + 5, seg.n - h - 5, 7):
+        assert np.max(np.abs(seg.QD[i] - P1 @ seg.Q[i - h:i + h + 1])) < 2e-3
+        assert np.max(np.abs(seg.QDD[i] - P2 @ seg.Q[i - h:i + h + 1])) < 2e-2
+    assert np.max(np.abs(np.diff(seg.QDD, axis=0))) < 0.1          # was ~0.6-1.3 with central differences
+    qi = q0 + np.cumsum(seg.QD, axis=0) * dt - 0.5 * seg.QD * dt   # q, qd consistent
+    assert np.max(np.abs(qi - seg.Q)) < 1e-4

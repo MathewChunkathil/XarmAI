@@ -128,6 +128,8 @@ class Pipeline:
             "gripper": ("gripper", "gripper.yaml"), "planning": ("planning", "planning.yaml"),
             "ranking": ("planning", "ranking.yaml")}.items()}
         self.q_ready = list(self.ws["ready_joint_state_rad"])
+        self.q_park = list(S["park_q"])
+        self.task_meta = None       # multi-cube task info for the kin log (set by sim.task_runner.TaskRunner)
         self.table_z = float(self.ws["table_top_z_m"])
         self.edge = self.model.edge_m
         # hidden shadow world: all IK/FK and all C270 rendering happen here, so the visible GUI world only
@@ -239,10 +241,23 @@ class Pipeline:
         w, x = self.world, self.aux
         if x is w:
             return
+        if w.belt is not None:                 # conveyor: the hidden camera world needs the same belt (cleat phase copied)
+            x.add_conveyor()
+            x.belt.set_phase(w.belt.phase)
         q = w.arm_q()
         g = w.p.getJointState(w.robot, w.grip_j[0])[0]
         x.set_arm(q)
         x.set_gripper(g)
+        if w.cubes or x.cubes:                 # multi-cube mode: copy every identified cube
+            for n in [n for n in x.cubes if n not in w.cubes]:
+                x.remove(x.cubes[n])
+            for n, body in w.cubes.items():
+                pos, orn = w.p.getBasePositionAndOrientation(body)
+                if n not in x.cubes:
+                    x.spawn_cube(pos[0], pos[1], 0.0, number=n)
+                x.p.resetBasePositionAndOrientation(x.cubes[n], pos, orn)
+                x.p.resetBaseVelocity(x.cubes[n], [0, 0, 0], [0, 0, 0])
+            return
         if w.cube is None:
             if x.cube is not None:
                 x.remove(x.cube)
@@ -517,6 +532,11 @@ class Pipeline:
                 break
         return x, y, float(self.rng.uniform(-math.pi, math.pi))
 
+    def perc_cfg(self, max_level=0):
+        """estimate_cube_pose cfg: context for the single-tag quality gate (image border, resting-cube constraint)."""
+        return {"image_size": (self.cam.W, self.cam.H), "T_base_cam": self.T_base_cam, "table_z": self.table_z,
+                "edge": self.edge, "max_level": max_level}
+
     def perceive(self):
         """3 frames -> detect -> PnP (K_est) -> median -> base frame with table constraint."""
         frames, dets_all, Ts, ids = [], [], [], set()
@@ -527,7 +547,7 @@ class Pipeline:
             frames.append(img)
             dets_all.append(d)
             r = estimate_cube_pose([(i, c) for i, c in d.items() if i in self.model.corners_cube],
-                                   self.K, self.dist, self.model)
+                                   self.K, self.dist, self.model, self.perc_cfg())
             if r.valid:
                 Ts.append(r.T_cam_cube)
                 ids.update(r.tag_ids_used)
@@ -583,6 +603,14 @@ class Pipeline:
     # ---------------- one run ----------------
     def run_one(self, k, close_ang, pose=None, total=None, respawn=True):
         """One pick-and-place. pose=(x, y, yaw_rad) is the cube pose source (None = random sampler)."""
+        return self.run_logged(k, lambda: self._run_one(k, close_ang, pose, total, respawn))
+
+    def log(self, *a):
+        log(*a)
+
+    def run_logged(self, k, body, task_meta=None):
+        """Run body() -> rec with the per-run kinematics log around it (shared by run_one and the multi-cube tasks).
+        task_meta (multi-cube tasks): the log gets a task file name + extra header and is skipped when nothing moved."""
         self.running_k = k
         use_kin = not getattr(self.args, "no_kin_log", False)
         self.kin = kin_log.RunLog(self.aux, "app" if self.app else ("gui" if self.args.gui else "headless"),
@@ -592,7 +620,7 @@ class Pipeline:
         self.world.on_segment = self._on_segment if use_kin else None
         rec, failure = None, None
         try:
-            rec = self._run_one(k, close_ang, pose, total, respawn)
+            rec = body()
         except BaseException as e:
             failure = e
             raise
@@ -603,7 +631,7 @@ class Pipeline:
             stopped = isinstance(failure, UserStop) or (isinstance(failure, pb.error) and is_disconnect_error(failure))
             if use_kin and not stopped:
                 r = rec if rec is not None else self._cur_rec
-                if r is not None:
+                if r is not None and (task_meta is None or self.kin.segs):
                     if rec is None:
                         r["outcome"] = "ERROR"
                     self.kin_path = self.write_kin_log(r)
@@ -628,6 +656,8 @@ class Pipeline:
                                                                      np.allclose(info["q"], q, atol=1e-9))})
             meta = {"rec": rec, "ik": ik_rows, "cands": self._cands, "cube_mass": float(self.world.cube_cfg["mass_kg"]),
                     "calib_source": self.calib_info["source"], "calib_timestamp": self.calib_info["timestamp"]}
+            if self.task_meta is not None:       # multi-cube task: file name + extra header fields
+                meta["task_meta"] = {k: v for k, v in self.task_meta.items() if k != "task"}
             out = getattr(self.args, "kin_dir", None) or os.path.join(ROOT, "results", "kin_logs")
             txt, _csv = self.kin.write(out, meta, pump=self.kin_pump)
             rel = os.path.relpath(txt, ROOT) if txt.startswith(ROOT) else txt
@@ -930,6 +960,235 @@ def write_outputs(args, intr, ext, recs, runtime, partial=False, aborted=None):
     return n_ok
 
 
+def parse_cubes_arg(text, names):
+    """'red,green' / '1,2' / 'all' -> [cube numbers]."""
+    inv = {v: k for k, v in names.items()}
+    out = []
+    for tok in (text or "").replace(" ", "").lower().split(","):
+        if not tok:
+            continue
+        if tok == "all":
+            return sorted(names)
+        n = inv.get(tok) or (int(tok) if tok.isdigit() else None)
+        if n not in names:
+            raise SystemExit("unknown cube '%s' in --cubes (valid: %s)" % (tok, ", ".join(names.values())))
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def parse_layout_arg(text, numbers, runner, rng):
+    """'random' or 'x,y,yaw_deg;x,y,yaw_deg;...' (metres, degrees) -> {cube: (x, y, yaw_rad)}."""
+    if (text or "random").strip().lower() == "random":
+        lay = runner.random_layout(numbers, rng)
+        if lay is None:
+            raise SystemExit("random layout failed: %d cubes do not fit with the minimum spacing" % len(numbers))
+        return lay
+    parts = [t for t in text.split(";") if t.strip()]
+    if len(parts) != len(numbers):
+        raise SystemExit("--layout has %d poses for %d cubes" % (len(parts), len(numbers)))
+    lay = {}
+    for n, t in zip(numbers, parts):
+        v = [float(u) for u in t.split(",")]
+        if len(v) != 3:
+            raise SystemExit("--layout pose must be x,y,yaw_deg: '%s'" % t)
+        lay[n] = (v[0], v[1], math.radians(v[2]))
+    return lay
+
+
+def run_multi(args):
+    """Multi-cube headless run: cubes + layout + a text command (rule-based parser, sim/commands.py)."""
+    from sim.task_runner import TaskRunner
+    t0 = time.time()
+    log("=" * 100 + "\n" + BANNER + "\n" + "=" * 100)
+    P = Pipeline(args)
+    R = TaskRunner(P)
+    numbers = parse_cubes_arg(args.cubes or "all", R.names)
+    try:
+        P.run_calibrations()
+        lay = parse_layout_arg(args.layout, numbers, R, P.rng)
+        R.apply_layout(lay)
+        log("\nScene: " + "; ".join("%s (cube %d) x=%.3f y=%.3f yaw=%.0f deg" % (
+            R.names[n], n, x, y, math.degrees(yw)) for n, (x, y, yw) in lay.items()))
+        pr = R.parse(args.command or "")
+        log("Command: %r" % args.command)
+        log("Parsed : %s" % (pr.echo or "-"))
+        for e in pr.errors:
+            log("  ERROR: " + e)
+        if not pr.tasks or pr.errors:
+            return 2
+        recs = R.execute(pr.tasks, args.command)
+        rows = print_task_table(R, pr.tasks, recs)
+        write_multi_outputs(args, R, pr, recs, rows, time.time() - t0)
+        n_ok = sum(r.get("outcome") == "SUCCESS" for r in recs)
+        log("\nTASKS %d/%d SUCCESS | runtime %.0f s (%d renders) | summary: %s" % (
+            n_ok, len(recs), time.time() - t0, P.n_renders, os.path.join(args.out, "summary.md")))
+        return 0 if n_ok == len(recs) else 1
+    finally:
+        P.close()
+
+
+def _stats(v):
+    v = [x for x in v if x != "" and x is not None]
+    return (float(np.mean(v)), float(np.max(v))) if v else (float("nan"), float("nan"))
+
+
+def run_conveyor(args):
+    """Conveyor headless mode. --conveyor --command "...": one command with the belt running at --conveyor-speed.
+    --conveyor-runs N [--conveyor-speed 0.02,0.04,0.06]: batch of N feed -> track -> pick -> place runs per speed."""
+    from sim.task_runner import TaskRunner
+    t0 = time.time()
+    log("=" * 100 + "\n" + BANNER + " | conveyor: kinematic belt, PLACEHOLDER geometry / speeds\n" + "=" * 100)
+    P = Pipeline(args)
+    R = TaskRunner(P)
+    w = P.world
+    try:
+        P.run_calibrations()
+        belt = w.add_conveyor()           # built AFTER the calibration: the calibration never sees the belt
+        if belt is None:
+            raise SystemExit("workspace.yaml has no conveyor: section")
+        speeds = [float(v) for v in str(args.conveyor_speed if args.conveyor_speed is not None else belt.cfg.speed_default).split(",")]
+        for v in speeds:
+            if not (0.0 <= v <= belt.cfg.speed_max + 1e-9):
+                raise SystemExit("--conveyor-speed %g m/s outside 0..%g" % (v, belt.cfg.speed_max))
+        if not args.conveyor_runs:
+            belt.set_speed(speeds[0])
+            belt.running = True
+            pr = R.parse(args.command or "")
+            log("Command: %r  (belt running at %.1f cm/s)" % (args.command, 100 * speeds[0]))
+            log("Parsed : %s" % (pr.echo or "-"))
+            for e in pr.errors:
+                log("  ERROR: " + e)
+            if not pr.tasks or pr.errors:
+                return 2
+            recs = R.execute(pr.tasks, args.command)
+            rows = print_task_table(R, pr.tasks, recs)
+            write_multi_outputs(args, R, pr, recs, rows, time.time() - t0)
+            for r in recs:
+                if r.get("belt_v_est_mm_s") is not None:
+                    log("belt: v_est %.2f +- %.2f mm/s | true %.2f | err %+.2f | frames %s/%s | t* +%.2f s | tool-vs-cube at contact %s mm | grasp offset %s mm | place err %s mm" % (
+                        r["belt_v_est_mm_s"], r["belt_sigma_v_mm_s"], r["belt_v_true_mm_s"], r["belt_v_err_mm_s"], r["belt_frames_used"],
+                        r["belt_frames"], r.get("belt_t_star_s", float("nan")), fmt(r.get("belt_track_err_mm", ""), "%.2f"),
+                        fmt(r.get("grasp_offset_mm", ""), "%.2f"), fmt(r.get("place_err_mm", ""), "%.2f")))
+            n_ok = sum(r.get("outcome") == "SUCCESS" for r in recs)
+            log("\nTASKS %d/%d SUCCESS | runtime %.0f s (%d renders) | summary: %s" % (
+                n_ok, len(recs), time.time() - t0, P.n_renders, os.path.join(args.out, "summary.md")))
+            return 0 if n_ok == len(recs) else 1
+        return run_conveyor_batch(args, P, R, belt, speeds, t0)
+    finally:
+        P.close()
+
+
+def run_conveyor_batch(args, P, R, belt, speeds, t0):
+    w = P.world
+    args.no_kin_log = True
+    rows = []
+    zones = R.zone_numbers
+    cubes = sorted(R.names)
+    for v in speeds:
+        log("\n=== conveyor batch: %d runs at %.1f cm/s ===" % (args.conveyor_runs, 100 * v))
+        for k in range(1, args.conveyor_runs + 1):
+            for n in list(w.cubes):
+                R.remove_cube(n)
+            w.detach_cube()
+            w.set_gripper(0.0)
+            w.set_arm(belt.cfg.park_q)
+            belt.set_speed(v)
+            belt.running = True
+            zone = zones[(k - 1) % len(zones)]
+            cube = cubes[(k - 1) % len(cubes)]
+            text = "feed the %s cube and pick the %s cube from the belt and place it in zone %d" % (R.names[cube], R.names[cube], zone)
+            log("\n--- speed %.1f cm/s, run %d/%d: %s ---" % (100 * v, k, args.conveyor_runs, text))
+            pr = R.parse(text)
+            recs = R.execute(pr.tasks, text)
+            r = recs[-1] if recs else {}
+            rows.append({"speed_m_s": v, "run": k, "cube": R.names[cube], "zone": zone, "outcome": r.get("outcome", "?"),
+                         "detail": (r.get("detail") or "").strip("; "),
+                         "v_est_mm_s": r.get("belt_v_est_mm_s", ""), "v_true_mm_s": r.get("belt_v_true_mm_s", ""),
+                         "v_err_mm_s": r.get("belt_v_err_mm_s", ""), "sigma_v_mm_s": r.get("belt_sigma_v_mm_s", ""),
+                         "frames": r.get("belt_frames_used", ""), "t_star_s": r.get("belt_t_star_s", ""),
+                         "track_err_mm": r.get("belt_track_err_mm", ""), "grasp_offset_mm": r.get("grasp_offset_mm", ""),
+                         "closing_off_mm": r.get("belt_closing_off_mm", ""), "place_err_mm": r.get("place_err_mm", "")})
+    os.makedirs(args.out, exist_ok=True)
+    with open(os.path.join(args.out, "conveyor_runs.csv"), "w", newline="", encoding="utf-8") as f:
+        wr = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        wr.writeheader()
+        wr.writerows(rows)
+    L = ["# XarmAI simulation - conveyor batch (moving-cube pick)\n", "**%s**\n" % BANNER,
+         "Honesty: SIMULATION ONLY; belt = kinematic translation of the cube, geometry / speeds / timing = PLACEHOLDER; the robot "
+         "estimates the cube velocity from %d camera frames (true belt speed only scores the estimate); grasp = kinematic attach; "
+         "GRASP_MISS = closing-axis offset above the open-finger margin (fingers would miss). seed %d, runtime %.0f s.\n" % (
+             belt.cfg.track_frames, args.seed, time.time() - t0),
+         "| speed cm/s | runs | SUCCESS | speed est err mean/max abs mm/s | sigma_v mean mm/s | tool-vs-cube at contact mean/max mm | grasp offset mean/max mm | place err mean/max mm | outcomes |",
+         "|---|---|---|---|---|---|---|---|---|"]
+    for v in speeds:
+        rs = [r for r in rows if r["speed_m_s"] == v]
+        ok = sum(r["outcome"] == "SUCCESS" for r in rs)
+        ve = _stats([abs(r["v_err_mm_s"]) for r in rs if r["v_err_mm_s"] != ""])
+        sg = _stats([r["sigma_v_mm_s"] for r in rs])
+        te = _stats([r["track_err_mm"] for r in rs])
+        go = _stats([r["grasp_offset_mm"] for r in rs])
+        pe = _stats([r["place_err_mm"] for r in rs if r["outcome"] == "SUCCESS"])
+        oc = {}
+        for r in rs:
+            oc[r["outcome"]] = oc.get(r["outcome"], 0) + 1
+        L.append("| %.1f | %d | %d/%d | %.2f / %.2f | %.2f | %.2f / %.2f | %.2f / %.2f | %.2f / %.2f | %s |" % (
+            100 * v, len(rs), ok, len(rs), ve[0], ve[1], sg[0], te[0], te[1], go[0], go[1], pe[0], pe[1],
+            ", ".join("%s %d" % kv for kv in oc.items())))
+    L.append("\nPlace error is over SUCCESS runs only. Per-run table: conveyor_runs.csv.")
+    with open(os.path.join(args.out, "conveyor_summary.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    log("\n" + "\n".join(L[-(len(speeds) + 3):]))
+    log("\nconveyor batch done | runtime %.0f s (%d renders) | %s" % (time.time() - t0, P.n_renders, os.path.join(args.out, "conveyor_summary.md")))
+    return 0
+
+
+def task_rows(R, tasks, recs):
+    rows = []
+    for i, (t, r) in enumerate(zip(tasks, recs), 1):
+        rows.append({"idx": i, "task": t.describe(R.names), "outcome": r.get("outcome", ""),
+                     "pick_src": (r.get("src_pick") or "-").split(" (")[0], "target_src": (r.get("src_target") or "-"),
+                     "nb": "%s/%s" % (r.get("nb_obstacles", "-"), r.get("nb_rejected", "-")),
+                     "feasible": r.get("feasible", ""), "err": fmt(r.get("place_err_mm", "")),
+                     "dz": fmt(r.get("stack_z_err_mm", "")), "pos_err": fmt(r.get("pos_err_mm", "")),
+                     "detail": (r.get("detail") or "").strip("; "), "kin": os.path.basename(r.get("kin_log", "") or "")})
+    return rows
+
+
+def print_task_table(R, tasks, recs):
+    rows = task_rows(R, tasks, recs)
+    log("\n# | task | pick pose from | err mm | dz mm | nbr obst/rej | outcome")
+    for r in rows:
+        log("%d | %s | %s | %s | %s | %s | %s%s" % (r["idx"], r["task"], r["pick_src"], r["err"] or "-", r["dz"] or "-",
+                                                  r["nb"], r["outcome"], (" (%s)" % r["detail"]) if r["detail"] else ""))
+        log("    target: %s" % r["target_src"])
+    return rows
+
+
+def write_multi_outputs(args, R, pr, recs, rows, runtime):
+    os.makedirs(args.out, exist_ok=True)
+    with open(os.path.join(args.out, "tasks.csv"), "w", newline="", encoding="utf-8") as f:
+        wr = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["idx"])
+        wr.writeheader()
+        wr.writerows(rows)
+    L = ["# XarmAI simulation - multi-cube command run\n", "**%s**\n" % BANNER,
+         "Command: `%s`  ->  parsed: %s  (seed %d, rule-based parser, no LLM). Runtime %.0f s.\n" % (
+             args.command, pr.echo, args.seed, runtime),
+         "Honesty labels: SIMULATION ONLY; C270 noise = PLACEHOLDER; grasp = kinematic attach; gripper = xArm Gripper "
+         "stand-in; cube colours / tint, zones 2-3, slot spacing, min cube spacing, finger footprint margin, stack release gap = "
+         "PLACEHOLDER; poses of cubes outside the camera view come from the last COMMANDED pose (stated per task).\n",
+         "| # | task | pick pose from | place / stack err mm | stack dz mm | neighbours considered / rejected | outcome |",
+         "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        L.append("| %d | %s | %s | %s | %s | %s | %s |" % (r["idx"], r["task"], r["pick_src"], r["err"] or "-", r["dz"] or "-",
+                                                         r["nb"], r["outcome"]))
+    L.append("\nTarget pose sources:\n")
+    for r in rows:
+        L.append("- task %d: %s" % (r["idx"], r["target_src"]))
+    with open(os.path.join(args.out, "summary.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gui", action="store_true", help="PyBullet GUI + OpenCV window 'C270 sim'")
@@ -946,9 +1205,32 @@ def main(argv=None):
                     help="do not write the per-run kinematics/dynamics logs (default: written to results/kin_logs/)")
     ap.add_argument("--kin-dir", default=None, help="directory of the per-run kin logs (default results/kin_logs)")
     ap.add_argument("--out", default=None, help="default results/sim_demo (results/sim_interactive for interactive)")
+    ap.add_argument("--cubes", default=None, help="multi-cube mode: cubes in the scene, e.g. red,green,blue or 1,2 or all")
+    ap.add_argument("--layout", default=None,
+                    help="multi-cube: 'random' (non-overlapping) or 'x,y,yaw_deg;x,y,yaw_deg;...' (m, deg) per cube in --cubes order")
+    ap.add_argument("--command", default=None,
+                    help='multi-cube: text command, e.g. "place green cube in zone 1 and stack red on green" '
+                         "(rule-based parser, no LLM)")
+    ap.add_argument("--conveyor", action="store_true",
+                    help="conveyor mode: belt running at --conveyor-speed, then --command (e.g. \"feed the red cube and pick the red cube "
+                         "from the belt and place it in zone 2\")")
+    ap.add_argument("--conveyor-runs", type=int, default=0,
+                    help="conveyor batch: N feed -> vision tracking -> pick -> place runs per speed (cycles cube colour and zone)")
+    ap.add_argument("--conveyor-speed", default=None,
+                    help="belt speed in m/s (default workspace.yaml conveyor.speed_m_s); comma list for the batch, e.g. 0.02,0.04,0.06")
     ap.add_argument("--hold", action=argparse.BooleanOptionalAction, default=None,
                     help="keep windows open after the last run (default: on with --gui)")
     args = ap.parse_args(argv)
+    if args.conveyor or args.conveyor_runs:            # conveyor mode (moving-cube pick)
+        if args.out is None:
+            args.out = os.path.join(ROOT, "results", "sim_conveyor")
+        args.runs = 0
+        return run_conveyor(args)
+    if args.cubes or args.command or args.layout:      # multi-cube mode (default 1-cube behaviour is untouched)
+        if args.out is None:
+            args.out = os.path.join(ROOT, "results", "sim_multi")
+        args.runs = 0
+        return run_multi(args)
     interactive = args.gui and not args.auto
     if args.out is None:
         args.out = os.path.join(ROOT, "results", "sim_interactive" if interactive else "sim_demo")

@@ -1,0 +1,8 @@
+# Pluggable "brain" for free-form commands (SIMULATION). The LLM only PROPOSES tasks; they pass the same
+# validation as the rule parser and run only after the user confirms (button / "yes" by voice).
+provider: ollama            # ollama | none (rules + fuzzy matching only)
+model: qwen2.5:3b
+url: http://localhost:11434
+timeout: 30                 # seconds per request
+confirm_voice: true         # spoken commands always ask "Did you mean ...?"
+confirm_text_rules: false   # typed commands the rule parser fully understood run directly

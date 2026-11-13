@@ -56,3 +56,62 @@ grasp = kinematic attach (L2.5, `attach_cube`) | gripper = xArm Gripper stand-in
   FK check against an independent numpy FK, trajectory equations and coefficients, peak speed/acceleration vs limits, model dynamics
   (inverse dynamics from URDF inertials + point-mass payload, forward-dynamics round trip; model values, not measured), summary.
   CSV: one row per sim step (t, q, qd, qdd, tau, TCP pose, gripper, attached).
+
+## Multi-cube commands (SIMULATION ONLY)
+- Three identified cubes (red 1, green 2, blue 3; tag IDs in `config/cube/cubes.yaml`) and three place zones. Type into the Commands box of
+  `scripts\sim_app.py` and press Run / Enter. Rule-based parser (`sim/commands.py`, no LLM), tasks run one after another, each with its own kin log.
+- Examples: `place the red cube in zone 1` - `put the green cube in zone 2 and stack red on green` - `move all cubes to zone 3` -
+  `stack all cubes in zone 1` - `put blue on top of red` - `home`. Errors (unknown cube, cube not in scene, zone out of range, stack > 3 high) are shown, nothing runs.
+- A single-tag cube pose is only used when it passes a quality gate (`cube_perception/pnp.py`: reprojection RMS, tag size, image border,
+  resting-cube z / tilt); otherwise the cube is PERCEPTION_FAIL with the reason. `scripts\measure_edge_poses.py` measures the outliers gate off / on.
+
+## Voice input (push-to-talk, offline) + free-form understanding
+- Hold the **Hold to talk** button (or hold **SPACE** while the window is focused and the text box is not) -> release -> faster-whisper
+  (`small.en`, CUDA float16, CPU int8 fallback) -> text appears in the command box ("Heard: ...") -> `sim/intent.py`. Max 10 s per recording, live level meter.
+- **Speak freely.** Order: (1) rule parser; (2) if it cannot parse, a local LLM (Ollama `qwen2.5:3b`, `config/ai.yaml`) proposes tasks;
+  (3) if Ollama is offline, fuzzy spelling correction + rules. The LLM only PROPOSES whitelisted actions; the proposal goes through the same
+  validation as the parser (cubes, zones, scene, stack height <= 3) and nothing moves until you confirm.
+- **Confirm.** Voice commands always show and speak (Windows TTS, checkbox **Speak replies**) `Did you mean: ...?` with **Yes, do it / No** buttons.
+  Answer by voice (`yes`, `yeah do it`, `no`, `cancel`) or text; anything else is treated as a new / corrected command. Typed commands the rules fully
+  understood run directly; typed text that needed the LLM / fuzzy fix also asks. A line under the voice meter shows `Brain: Ollama qwen2.5:3b ready` or `Ollama offline - rules only`.
+- Setup: install Ollama, `ollama pull qwen2.5:3b` (first reply is slower while the model loads; the app warms it at start).
+- First start downloads the model (~480 MB) into `models/whisper/` (git-ignored); the status shows `Voice: loading...` -> `Voice: ready (GPU)`.
+  GPU needs `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` (in `requirements.txt`; their DLL folders are registered by `sim/voice.py`).
+- Disabled (tooltip says why) when there is no microphone, the model is still loading, or a task is running.
+- Example phrases: `place the red cube in zone one` - `stack red on green` - `move all cubes to zone two` - `put cube two in zone three` - `go home`.
+- Test without speaking: `XARM_APP_TEST=1 XARM_APP_TEST_VOICE=<file.wav> XARM_APP_SHOTS=<dir> .venv\Scripts\python -I scripts\sim_app.py`
+  feeds the wav as if spoken, runs the command, saves dpg + 3D screenshots (no desktop capture). `tests/unit/test_voice.py` (model test skipped when not downloaded).
+
+## PDF report
+- `.venv\Scripts\python -I scripts\make_report.py --last N` builds `results/reports/<stamp>_xarm_sim_report.pdf` from the N newest kin logs
+  (`--since <stamp>`, `--logs`, `--runs-csv`, `--out` also available).
+
+## Conveyor: pick a MOVING cube (SIMULATION ONLY, all numbers PLACEHOLDER)
+- **Finding it in the app:** the left column scrolls (mouse wheel) - the CONVEYOR panel is at the bottom, with a `(?) how it works` tooltip.
+  Start belt -> set speed -> `Feed cube` (puts the chosen cube at the belt start) -> tick `Pick from belt to zone N` to auto-catch it.
+  Or say: `put the red cube on the belt and catch it into zone 2`.
+- **Belt** (`sim/conveyor.py`, config `conveyor:` in `config/workspace/workspace.yaml`): a straight lane along world x at y = -0.17 m,
+  x 0.18..0.47 m, cubes flow toward the robot (-x), end stop at x = 0.18 m. It overlaps no pick / place zone (static cubes never sit on it),
+  is inside reach and inside the C270 view with margin (`tests/sim/test_conveyor.py` projects every possible cube footprint with the TRUE camera: >= 30 px
+  from the image border). Dark rubber belt box, side rails, rollers, orange end stop and light cleat stripes that move with the belt; the
+  app also draws the yellow pick window. The belt is only built when asked for (`world.add_conveyor()`), so the calibration and the scored single-cube batch never see it.
+- **Kinematic belt**: every sim step an unattached cube resting on the belt is translated by `v*dt` along the flow (yaw kept, linear velocity set to
+  `v`, the physics step's own drift removed); a cube that reaches the end stop stops there. Belt speed 0..6 cm/s (default 3 cm/s, app slider /
+  `set conveyor speed to 4`). Belt state, cleat phase and cube poses are mirrored into the hidden camera world, so frames show the cube at the right sim time.
+- **Vision tracking** (`sim/belt_task.py`): the robot never reads the belt speed. It renders N = 5 camera frames 0.1 s apart (sim time passes between
+  frames), every frame -> AprilTags -> PnP (K_est) -> centre ray intersected with the known belt-top plane (T_base_cam estimate only) and fits
+  `s(t) = s0 + v (t - t_mean)` along the lane by least squares (leave-one-out rejection of frames > 2.5 mm off the line). It logs v_est +- sigma_v next to the TRUE speed (scoring only).
+  |v_est| below max(3 mm/s, 2 sigma) = "stationary".
+- **Intercept planning**: earliest grasp time t* = join (park -> pregrasp over the predicted cube, joint quintic) + hover 0.2 s + tracking descent;
+  candidates / neighbour filter / IK / place feasibility run on the PREDICTED pose. Execution = joint move -> `cartesian-tracking` hover (belt velocity weight
+  ramps 0 -> 1) -> tracking descent -> close the gripper while tracking -> kinematic attach -> lift with the belt velocity blended to zero -> normal place.
+  Segment type `cartesian-tracking` (`trajectory.plan_tracking`): `p(t) = p0 + v_est*Ib(t) + dz*s(tau)*e_z`, `Ib = w0 t + (w1-w0) T Is(tau)`, `Is = 2.5 tau^4 - 3 tau^5 + tau^6`,
+  q by per-step IK, qd / qdd analytic; the kin log prints the equation, p0, v_est, weights, dz and peaks vs limits.
+- Outcomes: SUCCESS, MISSED (pick window passed / cube would hit the end stop before the grip closed / IK or limits), GRASP_MISS (closing-axis
+  offset above the open-finger margin 7.5 mm), PERCEPTION_FAIL, PLACE_FAIL.
+- **App**: Conveyor panel (Start/Stop belt, speed slider 0-6 cm/s, Feed cube + Feed, `Pick from belt to zone N` auto-pick after the feed). Commands (voice too):
+  `start the conveyor` - `stop the belt` - `set conveyor speed to 4 cm per second` - `feed the red cube onto the conveyor` -
+  `pick the green cube from the belt and place it in zone 2` - `catch the blue cube on the conveyor and put it in zone 3`.
+- **Headless**: `.venv\Scripts\python -I scripts\sim_demo.py --conveyor --command "feed the red cube and pick the red cube from the belt and place it in zone 2" --use-calib-cache [--conveyor-speed 0.03]`;
+  batch `--conveyor-runs 10 --conveyor-speed 0.02,0.04,0.06` writes `results/sim_conveyor/conveyor_summary.md` + `conveyor_runs.csv`.
+  Test hook: `XARM_APP_TEST=1 XARM_APP_NO_SCREEN=1 XARM_APP_CUBES=1 XARM_APP_COMMAND="..." XARM_APP_SHOTS=<dir>` (dpg + 3D shots, incl. a mid-tracking shot).
