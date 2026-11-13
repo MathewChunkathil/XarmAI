@@ -1,23 +1,11 @@
 {
+  "1": "numpy",
   "2": "SimWorld",
   "3": "test_pnp.py",
-  "4": "sim_demo.py",
+  "4": "kin_log.py",
   "38": "App",
   "43": "test_world.py",
-  "44": "cube_model.py",
-  "45": "calibrate_checkerboard",
-  "46": "os",
-  "47": "numpy",
-  "48": "calib_cache.py",
-  "49": "pyb_world.py",
-  "50": "sim_app.py",
-  "51": "._run_one",
-  "52": "Exception",
-  "53": "Pipeline",
-  "54": ".interactive_loop",
-  "55": "PyBulletIK",
-  "56": ".ik_tcp",
-  "57": ".add_zone_overlays",
-  "58": ".closed_angle",
-  "59": ".draw_zones"
+  "48": "os",
+  "51": "sim_demo.py",
+  "52": "Exception"
 }

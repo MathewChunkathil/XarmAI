@@ -12,7 +12,8 @@ def test_sim_demo_disconnect_partial(tmp_path):
     env = dict(os.environ, XARM_SIM_TEST_DISCONNECT_AFTER_RUN="1")
     r = subprocess.run(
         [sys.executable, "-I", os.path.join(ROOT, "scripts", "sim_demo.py"), "--runs", "2", "--seed", "0",
-         "--calib-poses", "6", "--board-poses", "6", "--out", str(out)],
+         "--calib-poses", "6", "--board-poses", "6", "--out", str(out),
+         "--kin-dir", str(tmp_path / "kin")],
         capture_output=True, text=True, timeout=900, env=env)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     assert "Stopped by user" in r.stdout

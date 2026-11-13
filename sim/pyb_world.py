@@ -17,6 +17,8 @@ import pybullet_data
 import yaml
 from pybullet_utils import bullet_client
 
+from sim import trajectory as traj
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CACHE = os.path.join(HERE, "_cache")
@@ -27,6 +29,7 @@ DEFAULT_CFG = {
     "cube": os.path.join(ROOT, "config", "cube", "cube_model.yaml"),
     "workspace": os.path.join(ROOT, "config", "workspace", "workspace.yaml"),
     "camera": os.path.join(ROOT, "config", "camera", "c270_sim.yaml"),
+    "planning": os.path.join(ROOT, "config", "planning", "planning.yaml"),
 }
 
 
@@ -105,7 +108,9 @@ class SimWorld:
         self.speed = 1.0             # GUI pacing factor (1 = real time at 240 Hz)
         self._t_next = 0.0
         self.on_step = None          # optional per-step callback (GUI kinematics panel)
-        self.qd = np.zeros(5)        # commanded joint velocity [rad/s] (finite diff per step)
+        self.qd = np.zeros(5)        # commanded joint velocity [rad/s] (analytic / central difference per step)
+        self.sim_t = 0.0             # simulated time [s] = played steps * dt (independent of GUI speed / wall clock)
+        self.on_segment = None       # optional hook(Segment) called before a segment is played (kin log)
         self.dt_step = 1 / 240
         self.cfg_paths = dict(DEFAULT_CFG)
         if cfg_paths:
@@ -176,6 +181,9 @@ class SimWorld:
         self.hi = [i[9] for i in info]
         self.arm_lo = [p.getJointInfo(self.robot, j)[8] for j in self.arm_j]
         self.arm_hi = [p.getJointInfo(self.robot, j)[9] for j in self.arm_j]
+        self.arm_lo, self.arm_hi = np.array(self.arm_lo), np.array(self.arm_hi)
+        plan = _yaml(self.cfg_paths["planning"]) if os.path.exists(self.cfg_paths["planning"]) else {}
+        self.limits = traj.load_limits(plan, [p.getJointInfo(self.robot, j)[11] for j in self.arm_j])
 
         self.cube = None
         self.cube_attached = None
@@ -320,13 +328,16 @@ class SimWorld:
         Arm state is restored. 5-DOF: not every orientation is reachable (rot_err tells)."""
         p = self.p
         old = self.arm_q()
+        old_all = [p.getJointState(self.robot, j)[0] for j in self.movable]
         seed = list(old if seed is None else seed)
         rng = np.random.default_rng(1)
         pos = T_target[:3, 3].tolist()
         quat = quat_from_R(T_target[:3, :3])
         rngs = [h - l for l, h in zip(self.lo, self.hi)]
         best = None
+        self.last_tries = 0
         for k in range(tries):
+            self.last_tries = k + 1
             s = seed if k == 0 else [float(np.clip(v + rng.normal(0, 0.5), l, h))
                                      for v, l, h in zip(seed, self.arm_lo, self.arm_hi)]
             full = list(s) + [0.0] * 6
@@ -344,7 +355,7 @@ class SimWorld:
                 best = (score, q, pe, re)
             if pe < pos_tol and re < rot_tol:
                 break
-        for j, v in zip(self.arm_j, old):
+        for j, v in zip(self.movable, old_all):      # restore arm AND gripper joints (IK resets them)
             p.resetJointState(self.robot, j, v)
         _, q, pe, re = best
         return (pe < 1e-3 and re < math.radians(2.0)), q, pe, re
@@ -354,11 +365,43 @@ class SimWorld:
         """Minimum-jerk time scaling s(t), t in [0,1]."""
         return 10 * t ** 3 - 15 * t ** 4 + 6 * t ** 5
 
+    def ik_refine(self, T_target, q_seed, iters=12, w_rot=0.1):
+        """Damped Newton IK polish on link_tcp (pos + w_rot*rot residual) from q_seed, to ~1e-10 m when reachable.
+        Used per step of Cartesian segments (smooth q). Arm state restored. -> (q5, pos_err_m, rot_err_rad)."""
+        p, rb, tcp = self.p, self.robot, self.tcp_link
+        old = self.arm_q()
+        q = np.array(q_seed, float)
+        Rt = T_target[:3, :3]
+        zeros = [0.0] * len(self.movable)
+        pe = re = 0.0
+        for it in range(iters + 1):
+            for j, v in zip(self.arm_j, q):
+                p.resetJointState(rb, j, float(v))
+            st = p.getLinkState(rb, tcp, computeForwardKinematics=1)
+            pos = np.array(st[4])
+            R = np.array(pb.getMatrixFromQuaternion(st[5])).reshape(3, 3)
+            ev = T_target[:3, 3] - pos
+            er = cv2.Rodrigues(Rt @ R.T)[0].ravel()
+            pe, re = float(np.linalg.norm(ev)), float(np.linalg.norm(er))
+            if it == iters or (pe < 1e-10 and re < 1e-9):
+                break
+            Jt, Jr = p.calculateJacobian(rb, tcp, [0, 0, 0], list(q) + [0.0] * (len(zeros) - 5), zeros, zeros)
+            J = np.vstack([np.array(Jt)[:, :5], w_rot * np.array(Jr)[:, :5]])
+            e = np.concatenate([ev, w_rot * er])
+            dq = J.T @ np.linalg.solve(J @ J.T + 1e-10 * np.eye(6), e)
+            q = q + dq
+            if float(np.max(np.abs(dq))) < 1e-12:
+                break
+        for j, v in zip(self.arm_j, old):
+            p.resetJointState(rb, j, v)
+        return q, pe, re
+
     def _tick(self):
         self.p.stepSimulation()
+        self.sim_t += self.dt_step
         if self.on_step is not None:
             self.on_step()
-        if self.gui:        # pace to dt/speed (deadline based, so on_step cost is absorbed)
+        if self.gui:        # pace to dt/speed (deadline based, so on_step cost is absorbed); speed = playback only
             now = time.perf_counter()
             if self._t_next < now - 0.1:
                 self._t_next = now
@@ -367,28 +410,44 @@ class SimWorld:
             if sl > 0:
                 time.sleep(sl)
 
-    def move_joints(self, q_from, q_to, steps=40, max_step_rad=0.008):
-        """Smooth quintic joint move (kinematic, teleport per step). steps = minimum step count; scaled up
-        with the largest joint delta so the speed stays bounded."""
-        a, b = np.array(q_from, float), np.array(q_to, float)
-        if float(np.max(np.abs(b - a))) < 1e-6:
-            return
-        n = max(int(steps), int(math.ceil(float(np.max(np.abs(b - a))) / max_step_rad)))
-        prev = a.copy()
-        for t in range(1, n + 1):
-            q = a + self.quintic(t / n) * (b - a)
-            self.qd = (q - prev) / self.dt_step
-            prev = q
-            self.set_arm(q)
+    def play(self, seg):
+        """Play a trajectory.Segment: one set_arm / set_gripper + physics step per sim step (kinematic, teleport)."""
+        seg.t0 = self.sim_t
+        seg.attached = self.cube_attached is not None
+        if self.on_segment is not None:
+            self.on_segment(seg)
+        arm_moves = seg.kind != "gripper-quintic"
+        for i in range(seg.n):
+            if arm_moves:
+                self.set_arm(seg.Q[i])
+            else:
+                self.set_gripper(seg.G[i])
+            self.qd = seg.QD[i]
             self._tick()
         self.qd = np.zeros(5)
+        seg.T_tcp_end_pb = self.tcp_T()
+        return seg
 
-    def move_gripper(self, ang, steps=24):
-        """Eased gripper open/close."""
+    def move_joints(self, q_from, q_to, name="move"):
+        """Joint-space quintic within the velocity / acceleration limits (time from the limits, not from a step count)."""
+        a, b = np.array(q_from, float), np.array(q_to, float)
+        if float(np.max(np.abs(b - a))) < 1e-6:
+            return None
+        g = self.p.getJointState(self.robot, self.grip_j[0])[0]
+        return self.play(traj.plan_joint(name, a, b, self.limits, g))
+
+    def move_line(self, q_to, ik_world=None, name="line"):
+        """Straight Cartesian line from the current TCP pose to FK(q_to) (IK per step on `ik_world`, default self)."""
+        a = np.array(self.arm_q(), float)
+        g = self.p.getJointState(self.robot, self.grip_j[0])[0]
+        return self.play(traj.plan_line(name, a, q_to, self.limits, ik_world or self, g))
+
+    def move_gripper(self, ang, name="gripper"):
+        """Eased gripper open/close over limits.grip_time (PLACEHOLDER)."""
         cur = self.p.getJointState(self.robot, self.grip_j[0])[0]
-        for t in range(1, steps + 1):
-            self.set_gripper(cur + (ang - cur) * self.quintic(t / steps))
-            self._tick()
+        if abs(ang - cur) < 1e-9:
+            return None
+        return self.play(traj.plan_gripper(name, self.arm_q(), cur, ang, self.limits))
 
     def set_cube_pose(self, x, y, yaw, settle=240):
         """Teleport the existing cube to (x, y, yaw) on the table and let it settle."""

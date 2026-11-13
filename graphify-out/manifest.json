@@ -252,9 +252,9 @@
     "semantic_hash": "806ba4045d104c1c19bb248132397f21"
   },
   "config/camera/c270_sim.yaml": {
-    "mtime": 1794484025.4385066,
-    "seen": 1794484451.1586812,
-    "ast_hash": "2467b1c5a2390b99d62fcf0954515144",
+    "mtime": 1794543934.4442315,
+    "seen": 1794545159.9493852,
+    "ast_hash": "8edb1944b742457aa4a6ce7810dba15b",
     "semantic_hash": ""
   },
   "config/gripper/gripper.yaml": {
@@ -264,10 +264,10 @@
     "semantic_hash": "05860e10d3868eba585cf9e2675c4d1f"
   },
   "config/planning/planning.yaml": {
-    "mtime": 1794477668.7785378,
-    "seen": 1794480302.0107126,
-    "ast_hash": "0a5da17d7840109c48552ac21f1b344f",
-    "semantic_hash": "0a5da17d7840109c48552ac21f1b344f"
+    "mtime": 1794544110.559505,
+    "seen": 1794545159.9493852,
+    "ast_hash": "0e6809fda10082eb7e3605cba5905f90",
+    "semantic_hash": ""
   },
   "config/planning/ranking.yaml": {
     "mtime": 1794477668.7991245,
@@ -402,9 +402,9 @@
     "semantic_hash": "266d2057d88267224ab0702f46ac29ce"
   },
   "scripts/sim_demo.py": {
-    "mtime": 1794485397.0951433,
-    "seen": 1794485472.2263422,
-    "ast_hash": "b24a8c7e131cf4c64823d0a981822b97",
+    "mtime": 1794544751.6691716,
+    "seen": 1794545159.9493852,
+    "ast_hash": "48444a36d960858bb5f7ad22af23a60e",
     "semantic_hash": ""
   },
   "sim/__init__.py": {
@@ -420,10 +420,10 @@
     "semantic_hash": "9b5c64b15bda525d21fc7cfc86cd2d22"
   },
   "sim/ik_adapter.py": {
-    "mtime": 1794478411.2060938,
-    "seen": 1794480302.0107126,
-    "ast_hash": "580a436f048eccbe26f1a7c4459a666a",
-    "semantic_hash": "580a436f048eccbe26f1a7c4459a666a"
+    "mtime": 1794544335.8524916,
+    "seen": 1794545159.9493852,
+    "ast_hash": "01e3a3a80acbf8c9e28c1377da70cc5c",
+    "semantic_hash": ""
   },
   "sim/preview.py": {
     "mtime": 1794477982.9252377,
@@ -432,16 +432,16 @@
     "semantic_hash": "acaec7e9bfaff207db4dc63301bc8ac6"
   },
   "sim/pyb_world.py": {
-    "mtime": 1794485397.094139,
-    "seen": 1794485472.2263422,
-    "ast_hash": "9f069f9c7f3b8eed706820c54701e11a",
+    "mtime": 1794544161.0757682,
+    "seen": 1794545159.9493852,
+    "ast_hash": "03167db0c226854a012ccb1feb9302a0",
     "semantic_hash": ""
   },
   "tests/sim/test_sim_demo_smoke.py": {
-    "mtime": 1794478809.9367743,
-    "seen": 1794480302.0107126,
-    "ast_hash": "b12d6b9285c0ae53f394938404d4bc0c",
-    "semantic_hash": "b12d6b9285c0ae53f394938404d4bc0c"
+    "mtime": 1794544735.6183891,
+    "seen": 1794545159.9493852,
+    "ast_hash": "252128ed4be7202337e02d3a2e561509",
+    "semantic_hash": ""
   },
   "tests/sim/test_world.py": {
     "mtime": 1794478064.4611187,
@@ -450,21 +450,21 @@
     "semantic_hash": "7c03554ea5d6f6a1bce5942b9327046e"
   },
   "docs/DEMO_SCRIPT.md": {
-    "mtime": 1794479083.1270611,
-    "seen": 1794480302.0107126,
-    "ast_hash": "a7c5d135341c0250bb1a59c95d13a4fd",
-    "semantic_hash": "a7c5d135341c0250bb1a59c95d13a4fd"
+    "mtime": 1794544982.3948407,
+    "seen": 1794545159.9493852,
+    "ast_hash": "0149f2d801b432833019d54a7b66c02f",
+    "semantic_hash": ""
   },
   "results/sim_demo/summary.md": {
-    "mtime": 1794479799.664077,
-    "seen": 1794480302.0107126,
-    "ast_hash": "691ecc3bf7bf01d9670931ebd19af362",
-    "semantic_hash": "691ecc3bf7bf01d9670931ebd19af362"
+    "mtime": 1794544924.595611,
+    "seen": 1794545159.9493852,
+    "ast_hash": "154616fe7a926c723d16d272d3e38d29",
+    "semantic_hash": ""
   },
   "sim/README.md": {
-    "mtime": 1794483893.1671536,
-    "seen": 1794483896.380753,
-    "ast_hash": "a8f464c661540c53d677d7c64709de98",
+    "mtime": 1794544991.5929785,
+    "seen": 1794545159.9493852,
+    "ast_hash": "609bf3b86eec6103b78c330086cf7866",
     "semantic_hash": ""
   },
   "results/sim_demo/preview_cam.png": {
@@ -474,21 +474,21 @@
     "semantic_hash": "2c13accd620643471af185a54700427e"
   },
   "tests/sim/test_sim_demo_disconnect.py": {
-    "mtime": 1794479425.8133593,
-    "seen": 1794480302.0107126,
-    "ast_hash": "df87b952c3b411f30740b6467f2e9e4e",
-    "semantic_hash": "df87b952c3b411f30740b6467f2e9e4e"
+    "mtime": 1794544735.6193943,
+    "seen": 1794545159.9493852,
+    "ast_hash": "d5acce32f7426db1c9f71e5e0b734f12",
+    "semantic_hash": ""
   },
   "results/sim_calib/sim_calib.json": {
-    "mtime": 1794484243.311121,
-    "seen": 1794484451.1586812,
-    "ast_hash": "d184d2f2d77a92b31e74c2ec7268b223",
+    "mtime": 1794544550.2267182,
+    "seen": 1794545159.9493852,
+    "ast_hash": "2d98139f38b4fc072309f8aa58f1306e",
     "semantic_hash": ""
   },
   "scripts/sim_app.py": {
-    "mtime": 1794485390.1084402,
-    "seen": 1794485472.2263422,
-    "ast_hash": "ccbac8e9eea0b7e0c1ff84631885d356",
+    "mtime": 1794544410.8595245,
+    "seen": 1794545159.9493852,
+    "ast_hash": "45ce47d7ac84668bc68252d46ba1a6ea",
     "semantic_hash": ""
   },
   "sim/calib_cache.py": {
@@ -765,6 +765,24 @@
     "mtime": 1794485427.8593342,
     "seen": 1794485472.2263422,
     "ast_hash": "74636ad2c6d2958eb7ca4281140fe2e0",
+    "semantic_hash": ""
+  },
+  "sim/kin_log.py": {
+    "mtime": 1794544256.137081,
+    "seen": 1794545159.9493852,
+    "ast_hash": "b0c3a9b2c5f50a07b978f50c12f83290",
+    "semantic_hash": ""
+  },
+  "sim/trajectory.py": {
+    "mtime": 1794544135.7778676,
+    "seen": 1794545159.9493852,
+    "ast_hash": "c306770877cf149631235cd8f83f0729",
+    "semantic_hash": ""
+  },
+  "tests/unit/test_kin_log.py": {
+    "mtime": 1794544436.0752885,
+    "seen": 1794545159.9493852,
+    "ast_hash": "389980efe73f4c2f4988497676afce83",
     "semantic_hash": ""
   }
 }

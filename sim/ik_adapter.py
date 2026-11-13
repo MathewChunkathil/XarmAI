@@ -28,18 +28,26 @@ class PyBulletIK:
         self.T_tool_tcp = T_TOOL_TCP if T_tool_tcp is None else np.asarray(T_tool_tcp, float)
         self.calls = 0
 
-    def solve(self, pose_4x4, seed):
-        self.calls += 1
+    def solve_info(self, pose_4x4, seed):
+        """Like solve() but returns details: dict(ok, q, pe_m, re_rad, tries, reason)."""
         T = np.asarray(pose_4x4, float) @ self.T_tool_tcp
-        ok, q, _pe, _re = self.world.ik_tcp(T, seed=list(seed))
+        ok, q, pe, re = self.world.ik_tcp(T, seed=list(seed))
+        tries = self.world.last_tries
         # PyBullet DLS often stops 1-3 mm short; re-seeding from its own answer converges (0.02 mm).
         for _ in range(REFINE_PASSES):
-            if ok or _pe > REFINE_MAX_POS_ERR_M or _re > REFINE_MAX_ROT_ERR_RAD:
+            if ok or pe > REFINE_MAX_POS_ERR_M or re > REFINE_MAX_ROT_ERR_RAD:
                 break
-            ok, q, _pe, _re = self.world.ik_tcp(T, seed=list(q), tries=1)
-        if not ok:
+            ok, q, pe, re = self.world.ik_tcp(T, seed=list(q), tries=1)
+            tries += 1
+        return {"ok": ok, "q": [float(v) for v in q] if ok else None, "pe_m": pe, "re_rad": re, "tries": tries,
+                "reason": "" if ok else "NO_IK"}
+
+    def solve(self, pose_4x4, seed):
+        self.calls += 1
+        r = self.solve_info(pose_4x4, seed)
+        if not r["ok"]:
             return False, None, "NO_IK"
-        return True, [float(v) for v in q], ""
+        return True, r["q"], ""
 
     def joint_limits(self):
         return list(self.world.arm_lo), list(self.world.arm_hi)

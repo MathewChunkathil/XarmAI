@@ -226,6 +226,13 @@ class App:
             self.pump()
             return orig(*a, **k)
         self.P.ik.solve = solve
+        ref = self.P.aux.ik_refine          # per-step IK of the pre-computed straight lines (hidden aux world)
+
+        def refine(*a, **k):
+            self.pump()
+            return ref(*a, **k)
+        self.P.aux.ik_refine = refine
+        self.P.kin_pump = self.pump         # keep the UI alive while the per-run kin log is computed
 
     def pump(self, force=False):
         """Render one Dear PyGui frame (throttled). Raises UserStop when either window is closed."""
@@ -373,7 +380,7 @@ class App:
                                 dpg.bind_item_theme(bb, th_ghost)
                         with dpg.group(horizontal=True):
                             dpg.add_text("Speed", color=MUTED)
-                            dpg.add_slider_float(tag="sl_speed", min_value=0.25, max_value=2.0, default_value=1.0,
+                            dpg.add_slider_float(tag="sl_speed", min_value=0.25, max_value=4.0, default_value=1.0,
                                                  format="%.2fx", width=-1, callback=self.on_speed)
                     with dpg.child_window(width=LEFT_W, height=sc(340), no_scrollbar=True):
                         title("Last run")
@@ -533,6 +540,7 @@ class App:
     # ------------------------------------------------------------ calibration
     def install_calib(self, d, source):
         self.P.apply_calib(d)
+        self.P.calib_info = {"source": source, "timestamp": d["timestamp"]}
         self.w.set_arm(sd.S["park_q"])       # apply_calib leaves the arm at ready; idle pose = park
         intr, ext = d["intr"], d["ext"]
         dpg.set_value("c_src", "cache, %s" % d["timestamp"] if source == "cache" else "fresh, %s" % d["timestamp"])
@@ -643,8 +651,8 @@ class App:
         self.P.phase = "home"
         try:
             self.w.detach_cube()
-            self.w.move_gripper(0.0, 16)
-            self.w.move_joints(self.w.arm_q(), sd.S["park_q"], 40)
+            self.w.move_gripper(0.0, name="home_open")
+            self.w.move_joints(self.w.arm_q(), sd.S["park_q"], name="home")
             cur = self.slider_vals()
             self.w.set_cube_pose(*cur, settle=0)
             self.applied = cur

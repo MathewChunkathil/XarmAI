@@ -1,6 +1,9 @@
 """XarmAI all-simulation demo (SIM_DEMO_PLAN.md).  SIMULATION ONLY.
 
-    .venv\\Scripts\\python -I scripts\\sim_demo.py --gui --runs 10 --seed 0
+    .venv\\Scripts\\python -I scripts\\sim_demo.py --runs 10 --seed 0            (scored headless batch)
+    .venv\\Scripts\\python -I scripts\\sim_demo.py --gui --auto --runs 10 --seed 0   (same, with windows)
+    (interactive GUI demo: scripts\\sim_app.py)
+Every run also writes a kinematics/dynamics validation log to results/kin_logs/ (--no-kin-log to skip).
 
 Flow: sim intrinsics calibration -> extrinsics A (tag on gripper, hand-eye) -> N x
 (random cube -> tags -> cube pose in base frame -> candidates -> IK + rank -> pick -> place).
@@ -34,6 +37,8 @@ from cube_perception import (corners_from_pupil, estimate_cube_pose, fold_yaw, c
                              load_cube_model, median_pose, to_base)
 from cube_perception.cube_model import tag_corners_in_tag_frame  # noqa: E402
 from sim import calib_cache  # noqa: E402
+from sim import kin_log  # noqa: E402
+from sim import trajectory as traj  # noqa: E402
 from sim.c270_camera import C270SimCamera, load_cfg  # noqa: E402
 from sim.ik_adapter import PyBulletIK  # noqa: E402
 from sim.pyb_world import SimWorld, T_from, Tinv, rot_err_rad  # noqa: E402
@@ -56,7 +61,6 @@ S = {
     "cube_margin_m": 0.03,
     "cube_min_dist_to_place_m": 0.10,
     "settle_steps": 240,
-    "move_steps": 40,
     "cube_upright_cos": math.cos(math.radians(10)),
     "min_valid_frames": 1,
     # Perception/intrinsics "park" pose: the ready pose puts the gripper in front of the camera (occludes the
@@ -145,6 +149,13 @@ class Pipeline:
         self._pb_txt = []           # [(item id, last string)]
         self.on_frame = None        # app hook: (img, dets, T_cam_cube) after every show()
         self.on_progress = None     # calibration progress hook: (stage, done, total)
+        self.calib_info = {"source": "unknown", "timestamp": "unknown"}
+        self.kin = None             # per-run kinematics log recorder (sim/kin_log.py)
+        self.kin_pump = None        # optional callable pumped while the log is computed (app keeps the UI alive)
+        self.kin_path = None
+        self._cur_rec = None
+        self._ik_targets = []
+        self._cands = []
         if self.cv_ui:
             self.world.on_step = self._on_step
         os.makedirs(os.path.join(args.out, "frames"), exist_ok=True)
@@ -316,6 +327,7 @@ class Pipeline:
         """Install a cached calibration (K, dist, T_base_cam, closed-gripper angle)."""
         self.K, self.dist, self.T_base_cam = d["K"], d["dist"], d["T_base_cam"]
         self.close_ang = d["close_ang"]
+        self.calib_info = {"source": "cache", "timestamp": d["timestamp"]}
         if not self.app:                     # app sets its own park pose; avoid a visible ready-pose flash
             self.world.set_arm(self.q_ready)
 
@@ -336,6 +348,7 @@ class Pipeline:
             self.close_ang = self.closed_angle()
             if use_cache:
                 calib_cache.save(intr, ext, self.close_ang, self.calib_hash())
+            self.calib_info = {"source": "fresh (this process)", "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
             return intr, ext
         p = self.world.p
         txt = p.addUserDebugText("Calibrating (hidden)...", [0.15, 0.0, 0.35], [1, 0.8, 0], 3.0)
@@ -347,6 +360,7 @@ class Pipeline:
         hp.world.set_arm(hp.q_ready)
         self.close_ang = hp.closed_angle()
         self.K, self.dist, self.T_base_cam = hp.K, hp.dist, hp.T_base_cam
+        self.calib_info = {"source": "fresh (hidden world, this process)", "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
         self.rng, self.cam.rng = hp.rng, hp.cam.rng       # continue the same random streams
         self.n_renders += hp.n_renders
         hp.close()
@@ -529,12 +543,19 @@ class Pipeline:
         return (float(Tb[0, 3]), float(Tb[1, 3]), float(Tb[2, 3]), cube_yaw(Tb)), T_cc, info
 
     # ---------------- motion ----------------
-    def move(self, q_to, steps=None):
-        w = self.world
-        w.move_joints(w.arm_q(), q_to, steps or S["move_steps"])
+    def move(self, q_to, name="move"):
+        """Joint-space quintic to q_to (time from the velocity / acceleration limits)."""
+        self.world.move_joints(self.world.arm_q(), q_to, name=name)
 
-    def gripper_to(self, ang, steps=24):
-        self.world.move_gripper(ang, steps)
+    def plan_line(self, name, q0, q1, g):
+        """Pre-compute a straight Cartesian TCP line q0 -> q1 (IK per step on the hidden aux world)."""
+        return traj.plan_line(name, q0, q1, self.world.limits, self.aux, g)
+
+    def play(self, seg):
+        self.world.play(seg)
+
+    def gripper_to(self, ang, name="gripper"):
+        self.world.move_gripper(ang, name=name)
 
     def closed_angle(self):
         """Gripper joint angle at which the finger AABB gap equals the cube edge (visual only)."""
@@ -563,13 +584,60 @@ class Pipeline:
     def run_one(self, k, close_ang, pose=None, total=None, respawn=True):
         """One pick-and-place. pose=(x, y, yaw_rad) is the cube pose source (None = random sampler)."""
         self.running_k = k
+        use_kin = not getattr(self.args, "no_kin_log", False)
+        self.kin = kin_log.RunLog(self.aux, "app" if self.app else ("gui" if self.args.gui else "headless"),
+                                  self.args.seed, k, t_base=self.world.sim_t) if use_kin else None
+        self.kin_path = None
+        self._cur_rec, self._ik_targets, self._cands = None, [], []
+        self.world.on_segment = self._on_segment if use_kin else None
+        rec, failure = None, None
         try:
             rec = self._run_one(k, close_ang, pose, total, respawn)
+        except BaseException as e:
+            failure = e
+            raise
         finally:
             self.phase = "idle"
-        self.running_k = None
+            self.world.on_segment = None
+            self.running_k = None
+            stopped = isinstance(failure, UserStop) or (isinstance(failure, pb.error) and is_disconnect_error(failure))
+            if use_kin and not stopped:
+                r = rec if rec is not None else self._cur_rec
+                if r is not None:
+                    if rec is None:
+                        r["outcome"] = "ERROR"
+                    self.kin_path = self.write_kin_log(r)
         self.last_outcome = rec["outcome"]
+        if self.kin_path:
+            rec["kin_log"] = self.kin_path
         return rec
+
+    def _on_segment(self, seg):
+        seg.phase = self.phase
+        if self.kin is not None:
+            self.kin.add_segment(seg)
+
+    def write_kin_log(self, rec):
+        """Write results/kin_logs/<stamp>_runNN_..._OUTCOME.txt/.csv. Never raises (a log problem must not fail a run)."""
+        try:
+            ik_rows = []
+            for name, T, seed, q in self._ik_targets:
+                info = self.ik.solve_info(T, seed)
+                ik_rows.append({"name": name, "T": T, "seed": np.asarray(seed, float), "q": np.asarray(q, float),
+                                "tries": info["tries"], "same": bool(info["q"] is not None and
+                                                                     np.allclose(info["q"], q, atol=1e-9))})
+            meta = {"rec": rec, "ik": ik_rows, "cands": self._cands, "cube_mass": float(self.world.cube_cfg["mass_kg"]),
+                    "calib_source": self.calib_info["source"], "calib_timestamp": self.calib_info["timestamp"]}
+            out = getattr(self.args, "kin_dir", None) or os.path.join(ROOT, "results", "kin_logs")
+            txt, _csv = self.kin.write(out, meta, pump=self.kin_pump)
+            rel = os.path.relpath(txt, ROOT) if txt.startswith(ROOT) else txt
+            log("  kin log: %s (+ .csv)" % rel.replace("\\", "/"))
+            return txt
+        except (UserStop, pb.error):
+            raise
+        except Exception as e:      # noqa: BLE001
+            log("  [kin log failed] %s: %s" % (type(e).__name__, e))
+            return None
 
     def _run_one(self, k, close_ang, pose, total, respawn):
         w, a = self.world, self.args
@@ -577,7 +645,7 @@ class Pipeline:
         x, y, yaw = self.sample_cube() if pose is None else pose
         self.phase = "perceive"
         if a.gui:
-            self.move(S["park_q"])
+            self.move(S["park_q"], "to_park")
         else:
             w.set_arm(S["park_q"])
         w.set_gripper(0.0)
@@ -591,6 +659,7 @@ class Pipeline:
                "est_x": "", "est_y": "", "est_yaw_deg": "", "pos_err_mm": "", "yaw_err_deg": "", "tags": "",
                "feasible": "", "total": "", "chosen_yaw_deg": "", "chosen_rank": "", "grasp_offset_mm": "",
                "place_err_mm": "", "place_yaw_err_deg": "", "upright": "", "outcome": ""}
+        self._cur_rec = rec
         est, T_cc, info = self.perceive()
         rec["tags"] = ",".join(map(str, info["tag_ids"]))
         head = ["run %02d%s  true x=%.3f y=%.3f yaw=%.1f" % (k, "" if self.interactive else "/%d" % (total or a.runs), xt, yt, math.degrees(yawt))]
@@ -610,6 +679,8 @@ class Pipeline:
         # ---- candidates ----
         cands = generate(est, self.cfg["gripper"], self.cfg["planning"], self.ws, "run%02d" % k, self.edge)
         evaluate(cands, self.ik, self.q_ready)
+        self._cands = [(c.candidate_id, c.rejection_reason or "ok", "", math.degrees(c.grasp_yaw_rad),
+                        c.score.total) for c in cands]
         res = rank(cands, self.cfg["ranking"])
         log(format_table(cands))
         nfeas = len(res.ranked)
@@ -640,33 +711,49 @@ class Pipeline:
         c = chosen
         rec["chosen_id"] = c.candidate_id
         rec.update(chosen_yaw_deg=math.degrees(c.grasp_yaw_rad), chosen_rank=chosen_rank + 1, total=c.score.total)
+        self._ik_targets = [
+            ("pregrasp", pose_to_matrix(c.pregrasp_pose), c.q_start, c.q_pregrasp),
+            ("grasp", pose_to_matrix(c.grasp_pose), c.q_pregrasp, c.q_grasp),
+            ("lift", pose_to_matrix(c.lift_pose), c.q_grasp, c.q_lift),
+            ("place_pre", chosen_plan["T_pre"], c.q_lift, chosen_plan["q_pre"]),
+            ("place", chosen_plan["T_place"], chosen_plan["q_pre"], chosen_plan["q_place"])]
         log("  chosen %s (rank %d of %d feasible), total %.3f" % (c.candidate_id, chosen_rank + 1, nfeas, c.score.total))
         self.show(info["img"], cand_lines + ["chosen %s yaw %.0f deg (%d feasible)" % (
             c.candidate_id, math.degrees(c.grasp_yaw_rad), nfeas)], info["dets"], T_cc)
 
         # ---- execute ----
+        # Straight vertical moves are pre-computed (IK per step, hidden aux world) so there is no pause mid-motion.
+        self.phase = "plan"
+        g_open, g_closed = 0.0, close_ang
+        line_down = self.plan_line("descend", c.q_pregrasp, c.q_grasp, g_open)
+        line_up = self.plan_line("lift", c.q_grasp, c.q_lift, g_closed)
+        line_pdown = self.plan_line("place_descend", chosen_plan["q_pre"], chosen_plan["q_place"], g_closed)
+        line_pup = self.plan_line("place_retreat", chosen_plan["q_place"], chosen_plan["q_pre"], g_open)
+        for sg in (line_down, line_up, line_pdown, line_pup):
+            if sg.info.get("fallback"):
+                log("  [cartesian fallback] %s -> joint quintic: %s" % (sg.name, sg.info["fallback"]))
         self.phase = "pregrasp"
-        self.move(self.q_ready)
+        self.move(self.q_ready, "to_ready")
         cube0 = w.cube_pose_true()[:3, 3].copy()
-        self.move(c.q_pregrasp)
+        self.move(c.q_pregrasp, "to_pregrasp")
         self.phase = "grasp"
-        self.move(c.q_grasp)
+        self.play(line_down)
         moved_pre = float(np.linalg.norm(w.cube_pose_true()[:2, 3] - cube0[:2])) * 1000
-        self.gripper_to(close_ang)
+        self.gripper_to(close_ang, "close_gripper")
         T_tcp_cube = Tinv(w.tcp_T()) @ w.cube_pose_true()       # TRUE offset (scoring)
         rec["grasp_offset_mm"] = float(np.linalg.norm(T_tcp_cube[:3, 3]) * 1000)
         w.attach_cube()
         self.phase = "lift"
-        self.move(c.q_lift)
+        self.play(line_up)
         self.phase = "place"
-        self.move(chosen_plan["q_pre"])
-        self.move(chosen_plan["q_place"])
+        self.move(chosen_plan["q_pre"], "transfer")
+        self.play(line_pdown)
         w.detach_cube()
-        self.gripper_to(0.0)
+        self.gripper_to(0.0, "open_gripper")
         self.phase = "retreat"
-        self.move(chosen_plan["q_pre"])
-        self.move(self.q_ready)
-        self.move(S["park_q"], 60)
+        self.play(line_pup)
+        self.move(self.q_ready, "to_ready_2")
+        self.move(S["park_q"], "to_park_end")
         for _ in range(S["settle_steps"]):
             w.p.stepSimulation()
         Tf = w.cube_pose_true()
@@ -751,7 +838,7 @@ class Pipeline:
                 return None
             qs.append(q)
             cur = q
-        return {"q_pre": qs[0], "q_place": qs[1]}
+        return {"q_pre": qs[0], "q_place": qs[1], "T_pre": T_pre, "T_place": T_place}
 
     def _save_frame(self, k):
         if self.last_frame is not None:
@@ -855,6 +942,9 @@ def main(argv=None):
     ap.add_argument("--use-calib-cache", action="store_true",
                     help="headless: load/save results/sim_calib/sim_calib.json instead of always calibrating "
                          "(default off: the scored demo calibrates for real)")
+    ap.add_argument("--no-kin-log", action="store_true",
+                    help="do not write the per-run kinematics/dynamics logs (default: written to results/kin_logs/)")
+    ap.add_argument("--kin-dir", default=None, help="directory of the per-run kin logs (default results/kin_logs)")
     ap.add_argument("--out", default=None, help="default results/sim_demo (results/sim_interactive for interactive)")
     ap.add_argument("--hold", action=argparse.BooleanOptionalAction, default=None,
                     help="keep windows open after the last run (default: on with --gui)")
@@ -899,7 +989,7 @@ def main(argv=None):
         if stopped:
             if intr is not None and ext is not None and (recs or not interactive):
                 write_outputs(args, intr, ext, recs, time.time() - t0, partial=True, aborted=aborted)
-            log("\nStopped - partial results saved (%d completed runs): %s" % (
+            log("\nStopped by user - partial results saved (%d completed runs): %s" % (
                 len(recs), os.path.join(args.out, "summary_partial.md")))
         else:
             n_ok = write_outputs(args, intr, ext, recs, time.time() - t0)

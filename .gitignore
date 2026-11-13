@@ -14,3 +14,5 @@ sim/urdf_build/
 sim/_cache/
 *.egg-info/
 results/sim_app/frames/
+
+results/kin_logs/

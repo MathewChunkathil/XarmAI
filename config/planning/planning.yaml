@@ -7,3 +7,10 @@ lift_distance_m: 0.08             # m, lift above grasp
 table_clearance_m: 0.02           # m, pregrasp z must be >= table_top_z + this
 max_velocity_scaling: 0.2         # commissioning limit (§5.8)
 max_acceleration_scaling: 0.2     # commissioning limit (§5.8)
+
+# ---- SIMULATION ONLY motion timing (sim/trajectory.py). All PLACEHOLDER, not hardware facts. ----
+sim_velocity_scale: 0.5            # PLACEHOLDER: fraction of URDF joint velocity limit (3.14 rad/s) -> 1.57 rad/s
+sim_joint_acc_limit_rad_s2: 2.5    # PLACEHOLDER, rad/s^2 per joint (= 5.0 x 0.5; xArm accel limit not identified)
+sim_min_segment_s: 0.3             # PLACEHOLDER, s: shortest joint segment
+sim_gripper_time_s: 0.6            # PLACEHOLDER, s: gripper open/close duration
+sim_cartesian_peak_speed_m_s: 0.1  # PLACEHOLDER, m/s: starting peak TCP speed of straight vertical moves

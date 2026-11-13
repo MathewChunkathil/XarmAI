@@ -4,8 +4,13 @@
 The grasp is a kinematic attach (no contact physics). The gripper is the xArm Gripper as a stand-in. IK is PyBullet, not MoveIt.
 No real robot and no real camera are used in this demo.
 
-Command: `.venv\Scripts\python -I scripts\sim_demo.py --gui --runs 10 --seed 0` (headless: leave out `--gui`, about 2.5 min).
-All numbers below come from `results/sim_demo/summary.md` (seed 0). Re-run to refresh them.
+Live GUI demo: `.venv\Scripts\python -I scripts\sim_app.py` (Dear PyGui control window + 3D view; calibration is cached, ready in about 1 s;
+one pick-and-place takes about 17 s of simulated time at speed 1x, the Speed slider only changes playback).
+Scored batch: `.venv\Scripts\python -I scripts\sim_demo.py --runs 10 --seed 0` (headless, about 3 min, always calibrates for real) or the
+same with windows: `scripts\sim_demo.py --gui --auto --runs 10 --seed 0`.
+All numbers below come from `results/sim_demo/summary.md` (seed 0, headless batch). Re-run to refresh them.
+Every run (app and batch) also writes a validation log pair `results/kin_logs/<time>_runNN_x.._y.._yaw.._OUTCOME.txt/.csv`
+(FK check vs an independent FK, IK errors, trajectory equations, joint speed/acceleration vs limits, model torques).
 
 ## 1. Problem (30 s)
 A UFACTORY xArm 5 must pick a 50 mm cube from a random place and put it at a target, using a cheap USB webcam (Logitech C270)
@@ -37,10 +42,10 @@ interface). Only the simulator pieces (`sim/`) and the script itself are throw-a
 | Intrinsics: RMS reprojection | 0.19 px; fx, fy within 0.06 %, cx 1.2 px, cy 3.4 px off |
 | Intrinsics: model difference vs true distortion | 4.4 px mean, 19 px max (image corners; the cube stays near the centre) |
 | Camera-to-base calibration error (vs truth, scoring only) | 0.8 mm / 0.21 deg (19 of 20 poses used, 1 outlier dropped) |
-| Cube position error (xy) | mean 0.72 mm, max 0.97 mm |
-| Cube yaw error (mod 90 deg) | mean 0.08 deg, max 0.13 deg |
-| Grasp offset TCP to cube centre | mean 0.80 mm, max 0.96 mm |
-| Place error | mean 0.82 mm, max 1.05 mm |
+| Cube position error (xy) | mean 0.68 mm, max 1.00 mm |
+| Cube yaw error (mod 90 deg) | mean 0.06 deg, max 0.14 deg |
+| Grasp offset TCP to cube centre | mean 0.73 mm, max 1.02 mm |
+| Place error | mean 0.76 mm, max 1.16 mm |
 
 ## 5. What it proves and what it does NOT (60 s)
 **Proves:** the software chain is consistent end to end: frame conventions (cube model, tag corners, hand-eye, base frame), the multi-tag PnP,
@@ -51,7 +56,7 @@ Errors are measured against ground truth that the pipeline never reads. Reproduc
 - Real accuracy. The C270 noise, blur, distortion, JPEG quality and lighting are **PLACEHOLDER**, tuned by eye. The sub-millimetre numbers are a best case: a noise-free pinhole world with a perfect robot model. Real numbers will likely be worse.
 - Grasping. The grasp is a **kinematic attach**: the cube is rigidly tied to the TCP. Friction, slip, finger collision and force are not tested.
 - The real gripper. It is unidentified (photo pending); the xArm Gripper is a stand-in, and its TCP offset is not measured.
-- Motion planning. IK is **PyBullet** with joint-space interpolation and no collision checking along the path. MoveIt, Gazebo and the execution gate are not exercised.
+- Motion planning. IK is **PyBullet**; transit moves are joint-space quintics and the vertical approach/lift/place moves are straight Cartesian lines, with no collision checking along the path. Speed (50 % of the URDF joint velocity limit) and acceleration limits, gripper time and Cartesian speed are **PLACEHOLDER** values. The torques in the kin logs are model values from the URDF inertials (the sim is kinematic), not measurements. MoveIt, Gazebo and the execution gate are not exercised.
 - Safety, recovery and timing. Nothing here touches the real robot.
 - The arm must be parked aside while the camera looks (at the ready pose it would block the view). That is a layout finding for the real cell.
 - Place tolerance (10 mm) and the cube workspace are PLACEHOLDERs until measured in the lab.
