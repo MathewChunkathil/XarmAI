@@ -1,0 +1,4 @@
+# Optional: CUDA 12 runtime DLLs so faster-whisper (voice) runs on an NVIDIA GPU (~1 GB download).
+# install.ps1 adds this file automatically when nvidia-smi finds a GPU (skip with -CpuOnly). Without it voice uses the CPU.
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.28.1.4

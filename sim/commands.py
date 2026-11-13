@@ -337,10 +337,17 @@ def parse(text: str, cubes: Optional[Dict[int, str]] = None, zones: Sequence[int
     raw = [t for t in raw if not (t.action == "pick_belt" and t.zone is None)]
     if not raw and not res.errors:
         res.errors.append("no command found in '%s'" % text.strip())
-    # validation against zones / scene
+    return finalize(raw, names, tuple(zones), scene, res)
+
+
+def finalize(raw: List[Task], names, zones, scene, res: Optional[ParseResult] = None) -> ParseResult:
+    """Validate (cubes, zones, scene), order (stack dependencies), check stack height, build the echo.
+    Shared by the rule parser and by sim/intent.py (LLM proposals get EXACTLY the same checks)."""
+    res = res if res is not None else ParseResult()
+    zones = tuple(zones)
     valid: List[Task] = []
     for t in raw:
-        errs = _validate(t, names, tuple(zones), scene)
+        errs = _validate(t, names, zones, scene)
         if errs:
             res.errors.extend(errs)
         else:

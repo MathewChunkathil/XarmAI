@@ -65,10 +65,16 @@ grasp = kinematic attach (L2.5, `attach_cube`) | gripper = xArm Gripper stand-in
 - A single-tag cube pose is only used when it passes a quality gate (`cube_perception/pnp.py`: reprojection RMS, tag size, image border,
   resting-cube z / tilt); otherwise the cube is PERCEPTION_FAIL with the reason. `scripts\measure_edge_poses.py` measures the outliers gate off / on.
 
-## Voice input (push-to-talk, offline, no LLM)
+## Voice input (push-to-talk, offline) + free-form understanding
 - Hold the **Hold to talk** button (or hold **SPACE** while the window is focused and the text box is not) -> release -> faster-whisper
-  (`small.en`, CUDA float16, CPU int8 fallback) -> text appears in the command box ("Heard: ...") -> the same rule parser as typing.
-  Checkbox **Auto-run after voice** (default on); off = review / edit, then press Run. Max 10 s per recording, live level meter.
+  (`small.en`, CUDA float16, CPU int8 fallback) -> text appears in the command box ("Heard: ...") -> `sim/intent.py`. Max 10 s per recording, live level meter.
+- **Speak freely.** Order: (1) rule parser; (2) if it cannot parse, a local LLM (Ollama `qwen2.5:3b`, `config/ai.yaml`) proposes tasks;
+  (3) if Ollama is offline, fuzzy spelling correction + rules. The LLM only PROPOSES whitelisted actions; the proposal goes through the same
+  validation as the parser (cubes, zones, scene, stack height <= 3) and nothing moves until you confirm.
+- **Confirm.** Voice commands always show and speak (Windows TTS, checkbox **Speak replies**) `Did you mean: ...?` with **Yes, do it / No** buttons.
+  Answer by voice (`yes`, `yeah do it`, `no`, `cancel`) or text; anything else is treated as a new / corrected command. Typed commands the rules fully
+  understood run directly; typed text that needed the LLM / fuzzy fix also asks. A line under the voice meter shows `Brain: Ollama qwen2.5:3b ready` or `Ollama offline - rules only`.
+- Setup: install Ollama, `ollama pull qwen2.5:3b` (first reply is slower while the model loads; the app warms it at start).
 - First start downloads the model (~480 MB) into `models/whisper/` (git-ignored); the status shows `Voice: loading...` -> `Voice: ready (GPU)`.
   GPU needs `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` (in `requirements.txt`; their DLL folders are registered by `sim/voice.py`).
 - Disabled (tooltip says why) when there is no microphone, the model is still loading, or a task is running.
@@ -81,6 +87,9 @@ grasp = kinematic attach (L2.5, `attach_cube`) | gripper = xArm Gripper stand-in
   (`--since <stamp>`, `--logs`, `--runs-csv`, `--out` also available).
 
 ## Conveyor: pick a MOVING cube (SIMULATION ONLY, all numbers PLACEHOLDER)
+- **Finding it in the app:** the left column scrolls (mouse wheel) - the CONVEYOR panel is at the bottom, with a `(?) how it works` tooltip.
+  Start belt -> set speed -> `Feed cube` (puts the chosen cube at the belt start) -> tick `Pick from belt to zone N` to auto-catch it.
+  Or say: `put the red cube on the belt and catch it into zone 2`.
 - **Belt** (`sim/conveyor.py`, config `conveyor:` in `config/workspace/workspace.yaml`): a straight lane along world x at y = -0.17 m,
   x 0.18..0.47 m, cubes flow toward the robot (-x), end stop at x = 0.18 m. It overlaps no pick / place zone (static cubes never sit on it),
   is inside reach and inside the C270 view with margin (`tests/sim/test_conveyor.py` projects every possible cube footprint with the TRUE camera: >= 30 px

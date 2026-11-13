@@ -34,6 +34,8 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import sim_demo as sd  # noqa: E402  (adds ROOT + src/* to sys.path)
 from sim import calib_cache as cc  # noqa: E402
 from sim import commands as cmd_mod  # noqa: E402
+from sim import intent as intent_mod  # noqa: E402
+from sim import tts  # noqa: E402
 from sim import zones as zn  # noqa: E402
 from sim.task_runner import TaskRunner, M as TM  # noqa: E402
 from sim.voice import VoiceInput, read_wav_16k, MAX_RECORD_S  # noqa: E402
@@ -78,6 +80,11 @@ PROFILE_AFTER = 4.0                                              # seconds after
 PROFILE_CUBES = [int(v) for v in os.environ.get("XARM_APP_START_CUBES", "1").split(",")]    # cubes enabled at start
 DEG = "\u00b0"
 MIC_IDLE = "🎤 Hold to talk / SPACE"
+BELT_HELP = ("CONVEYOR\n"
+             "1. Start belt: the belt runs at the speed on the slider (0-6 cm/s).\n"
+             "2. Feed cube: puts the chosen cube at the start of the belt; it rides along.\n"
+             "3. Tick 'Pick from belt to zone N' before Feed: the arm tracks the moving cube, grasps it and places it in zone N.\n"
+             "Voice / text: 'start the conveyor', 'set belt speed to 4', 'put the red cube on the belt and catch it into zone 2'.")
 
 
 class Cancel(Exception):
@@ -183,6 +190,13 @@ class App:
         self.voice_q = collections.deque()              # (text, info, error) from the transcription worker thread
         self.mic_src = ""                               # "button" | "key"
         self.voice_heard = ""
+        self.intent = intent_mod.IntentEngine(intent_mod.load_config())      # rules -> Ollama proposal -> fuzzy; user confirms
+        self.pending = None                             # (Proposal, text, source) waiting for yes / no
+        self.think_q = collections.deque()              # (Proposal, text, source) from the understanding worker thread
+        self.thinking = 0                               # running worker threads
+        self.brain = ("", AMBER)                        # status line text, colour
+        self._shot_pending = False
+        self.autoconfirm = bool(os.environ.get("XARM_APP_AUTOCONFIRM"))
         self._ui_cache = {}                             # tag -> last value / config (skip redundant dpg calls)
         self.prof = collections.defaultdict(float)       # XARM_APP_PROFILE=<s>: idle time per frame part
         self._fps_t, self._fps_n = time.perf_counter(), 0
@@ -230,6 +244,9 @@ class App:
         self.by = (1000 * (box["y_m"][0] + m), 1000 * (box["y_m"][1] - m))
         self.build_ui()
         self.voice.start_loading()                          # background thread: the UI never blocks on the model
+        if os.environ.get("XARM_APP_TEST"):
+            tts.enabled = False                             # silent test runs
+        self.start_brain_check()
         self.applied = {}
         self.sync_cube_widgets()
         for n, c in self.cs.items():
@@ -414,8 +431,8 @@ class App:
                 dpg.add_text("", tag="c_ext", color=MUTED)
             dpg.add_spacer(height=sc(2))
             with dpg.group(horizontal=True):
-                # ================= left column
-                with dpg.group():
+                # ================= left column (scrolls: on a small / high-DPI screen the lower panels would be cut off)
+                with dpg.child_window(width=LEFT_W + sc(18), height=-1, border=False, tag="left_col"):
                     with dpg.child_window(width=LEFT_W, height=sc(262), no_scrollbar=True):
                         title("Cubes & layout")
                         with dpg.group(horizontal=True):
@@ -444,7 +461,7 @@ class App:
                                 bb = dpg.add_button(label=lab, width=bw, height=sc(32), tag=tag,
                                                     callback=lambda s_, a_, u: self.req.append(u), user_data=r)
                                 dpg.bind_item_theme(bb, th_ghost)
-                    with dpg.child_window(width=LEFT_W, height=sc(284), no_scrollbar=True):
+                    with dpg.child_window(width=LEFT_W, height=sc(372), no_scrollbar=True):
                         title("Commands")
                         dpg.add_input_text(tag="cmd_in", hint="place the green cube in zone 1 and stack red on green",
                                            width=-1, on_enter=True, callback=self.on_cmd_enter)
@@ -463,9 +480,21 @@ class App:
                                 dpg.bind_item_font(bm, self.emoji_font)
                             with dpg.tooltip("b_mic"):
                                 dpg.add_text("Voice: loading...", tag="mic_tip")
-                            dpg.add_checkbox(label="Auto-run after voice", tag="ck_auto", default_value=True)
+                            dpg.add_checkbox(label="Speak replies", tag="ck_speak", default_value=tts.available(),
+                                             callback=lambda s_, a_: setattr(tts, "enabled", bool(a_)))
                         dpg.add_progress_bar(tag="v_level", width=-1, height=sc(20), default_value=0.0, overlay="Voice: loading...")
                         dpg.add_text("", tag="v_heard", wrap=LEFT_W - sc(30), color=(190, 198, 214), show=False)
+                        dpg.add_text("Brain: checking ...", tag="brain_line", color=MUTED, wrap=LEFT_W - sc(30))
+                        dpg.add_text("Thinking ...", tag="cmd_think", color=AMBER, show=False)
+                        with dpg.group(tag="confirm_box", show=False):
+                            dpg.add_text("", tag="confirm_q", wrap=LEFT_W - sc(30), color=AMBER)
+                            with dpg.group(horizontal=True):
+                                by_ = dpg.add_button(label="Yes, do it", tag="b_yes", width=(LEFT_W - sc(38)) // 2, height=sc(30),
+                                                     callback=lambda: self.submit_command("yes", "text"))
+                                dpg.bind_item_theme(by_, th_primary)
+                                bn_ = dpg.add_button(label="No", tag="b_no", width=-1, height=sc(30),
+                                                     callback=lambda: self.submit_command("no", "text"))
+                                dpg.bind_item_theme(bn_, th_ghost)
                         dpg.add_text("", tag="cmd_echo", wrap=LEFT_W - sc(30), color=(190, 198, 214))
                         dpg.add_text("", tag="cmd_err", color=RED, wrap=LEFT_W - sc(30), show=False)
                         with dpg.child_window(width=-1, height=-1, border=False):
@@ -493,12 +522,19 @@ class App:
                             dpg.add_text("Speed", color=MUTED)
                             dpg.add_slider_float(tag="sl_speed", min_value=0.25, max_value=4.0, default_value=1.0,
                                                  format="%.2fx", width=-1, callback=self.on_speed)
-                    with dpg.child_window(width=LEFT_W, height=sc(142), no_scrollbar=True):
+                    with dpg.child_window(width=LEFT_W, height=sc(214), no_scrollbar=True):
                         with dpg.group(horizontal=True):
                             dpg.add_text("CONVEYOR", color=ACCENT)
                             dpg.add_spacer(width=sc(8))
                             dpg.add_text("stopped", tag="belt_state", color=MUTED)
+                            dpg.add_spacer(width=sc(8))
+                            dpg.add_text("(?) how it works", color=AMBER, tag="belt_help")
+                            with dpg.tooltip("belt_help"):
+                                dpg.add_text(BELT_HELP, wrap=sc(340))
                         dpg.add_separator()
+                        dpg.add_text("Start belt, set the speed, Feed puts the chosen cube on the belt start. Tick 'Pick from "
+                                     "belt' to catch it into a zone. Or say: put the red cube on the belt and catch it into zone 2.",
+                                     wrap=LEFT_W - sc(30), color=MUTED)
                         with dpg.group(horizontal=True):
                             bb = dpg.add_button(label="Start belt", tag="b_belt", width=sc(104), height=sc(28),
                                                 callback=self.on_belt_toggle)
@@ -997,24 +1033,120 @@ class App:
         dpg.configure_item("b_stop", enabled=False)
         self.tee("[command] stop requested: the current task finishes, the rest is skipped")
 
+    def intent_context(self):
+        b = self.belt
+        return intent_mod.Context(dict(self.names), tuple(self.R.zone_numbers), set(self.R.in_scene()),
+                                  bool(b and b.running), 100.0 * (b.speed if b else 0.0))
+
+    def start_brain_check(self):
+        def work():
+            try:
+                ok, txt = self.intent.status()
+            except Exception as e:
+                ok, txt = False, "Brain check failed (%s) - rules only" % type(e).__name__
+            self.brain = (txt, GREEN if ok else AMBER)
+            self.tee("[brain] " + txt)
+            if ok:
+                self.intent.warm()                            # load the model now so the first command is fast
+        threading.Thread(target=work, daemon=True).start()
+
+    def say(self, text):
+        """Speak (if 'Speak replies' is ticked); never blocks."""
+        if text:
+            tts.speak(text)
+
     def submit_command(self, text, source="text"):
-        """Entry point for typed AND spoken commands (the voice agent calls submit_command(text, source="voice")).
-        Parses (rule-based, sim/commands.py), shows the echo / errors, queues the tasks. Returns True if queued.
-        Thread-safe enough: it only reads the scene and appends to the request queue."""
-        res = self.R.parse(text)
-        self.show_parse(res)
-        self.tee("[command/%s] %r -> %s%s" % (source, text, res.echo or "-", ("  ERRORS: " + "; ".join(res.errors)) if res.errors else ""))
+        """Entry point for typed AND spoken commands. While a proposal waits for confirmation a yes / no reply answers it;
+        anything else is a new command. Understanding (rules, then the optional local LLM) runs in a worker thread; the
+        result comes back through poll_think(). Nothing moves until the tasks are queued (typed + fully understood by
+        the rules, or confirmed)."""
+        text = (text or "").strip()
+        if self.pending is not None:
+            r = intent_mod.classify_reply(text)
+            if r == "yes":
+                self.tee("[command/%s] %r -> confirmed" % (source, text))
+                self.confirm_pending()
+                return True
+            if r == "no":
+                self.tee("[command/%s] %r -> cancelled" % (source, text))
+                self.cancel_pending("OK, cancelled")
+                return False
+            self.clear_pending()                                  # a new / corrected command replaces the old proposal
+        if not text:
+            return False
         if source != "text":
             dpg.set_value("cmd_in", text)
-        if not res.ok:
-            return False
+        self.show_parse(cmd_mod.ParseResult())
+        self.thinking += 1
+        dpg.configure_item("cmd_think", show=True)
+        ctx = self.intent_context()
+
+        def work():
+            try:
+                prop = self.intent.understand(text, ctx, from_voice=(source == "voice"))
+            except Exception as e:                                # never let a worker bug kill the app
+                prop = intent_mod.Proposal(errors=["understanding failed: %s: %s" % (type(e).__name__, e)])
+            self.think_q.append((prop, text, source))
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def poll_think(self):
+        while self.think_q:
+            prop, text, source = self.think_q.popleft()
+            self.thinking = max(0, self.thinking - 1)
+            dpg.configure_item("cmd_think", show=self.thinking > 0)
+            self.tee("[command/%s] %r -> %s [%s]%s%s" % (
+                source, text, prop.echo or "-", prop.source, ("  SAY: " + prop.say) if prop.say else "",
+                ("  ERRORS: " + "; ".join(prop.errors)) if prop.errors else ""))
+            if prop.raw is not None:
+                self.tee("[ai] raw %s" % prop.raw)
+            if self.thinking > 0:
+                continue                                          # a newer command is already being understood
+            if not prop.ok:
+                self.show_parse(cmd_mod.ParseResult(errors=prop.errors or ([] if prop.say else ["did not understand '%s'" % text])))
+                if prop.say:
+                    dpg.set_value("cmd_echo", prop.say)
+                    dpg.configure_item("cmd_echo", show=True)
+                    self.say(prop.say)
+                if self.test and prop.errors:
+                    self.test_result = "NOPARSE"
+                continue
+            if prop.needs_confirm:
+                self.pending = (prop, text, source)
+                self.show_parse(cmd_mod.ParseResult())
+                tag = {"ollama": "  [AI guess]", "fuzzy": "  [spelling fix]"}.get(prop.source, "")
+                dpg.set_value("confirm_q", prop.question + tag + "\nSay or press Yes / No.")
+                dpg.configure_item("confirm_box", show=True)
+                self.say(prop.question)
+                continue
+            self.show_parse(cmd_mod.ParseResult(tasks=prop.tasks, echo=prop.echo))
+            self.queue_tasks(prop.tasks, text, source)
+
+    def clear_pending(self):
+        self.pending = None
+        dpg.configure_item("confirm_box", show=False)
+
+    def cancel_pending(self, msg="OK, cancelled"):
+        self.clear_pending()
+        self.show_parse(cmd_mod.ParseResult())
+        dpg.set_value("cmd_echo", msg)
+        dpg.configure_item("cmd_echo", show=True)
+        self.say(msg)
+
+    def confirm_pending(self):
+        prop, text, source = self.pending
+        self.clear_pending()
+        self.show_parse(cmd_mod.ParseResult(tasks=prop.tasks, echo=prop.echo))
+        self.queue_tasks(prop.tasks, text, source)
+
+    def queue_tasks(self, tasks, text, source):
         if self.busy or not self.calibrated() or self.calib["state"] == "running":
             dpg.set_value("cmd_err", "busy or not calibrated - command not started")
             dpg.configure_item("cmd_err", show=True)
             return False
-        self.task_rows = [[t.describe(self.names), "queued", ""] for t in res.tasks]
+        self.task_rows = [[t.describe(self.names), "queued", ""] for t in tasks]
         self.refresh_tasks()
-        self.req.append(("cmd", res.tasks, text, source))
+        self.req.append(("cmd", tasks, text, source))
         return True
 
     # ------------------------------------------------------------ voice (push-to-talk)
@@ -1072,12 +1204,7 @@ class App:
             self.voice_heard = 'Heard: "%s"   (%.2f s, %s)' % (text, info.get("seconds", 0.0), self.voice.device.split()[0])
             self.tee("[voice] heard %r (%.2f s for %.1f s audio, %s)" % (text, info.get("seconds", 0), info.get("audio_s", 0),
                                                                      info.get("device", "")))
-            dpg.set_value("cmd_in", text)
-            if dpg.get_value("ck_auto"):
-                self.submit_command(text, source="voice")
-            else:
-                self.show_parse(self.R.parse(text))
-                self.voice_heard += "\nReview / edit, then press Run."
+            self.submit_command(text, source="voice")         # voice ALWAYS goes through "Did you mean ...?" (or answers it)
 
     def update_voice_ui(self):
         v = self.voice
@@ -1098,7 +1225,7 @@ class App:
         elif not self.calibrated():
             tip = "Disabled until calibration is done"
         else:
-            tip = "Hold, speak, release (or hold SPACE). Offline faster-whisper + rule parser, no LLM."
+            tip = "Hold, speak, release (or hold SPACE). Offline faster-whisper; the app asks Did you mean ... and acts after yes."
         self._val("mic_tip", tip)
         self._cfg("b_mic", label="🎤 Release to send" if listening else MIC_IDLE)
         if listening:
@@ -1112,6 +1239,7 @@ class App:
         self._cfg("v_level", overlay=txt)
         self._val("v_level", float(v.level) if listening else 0.0)
         self._val("v_heard", self.voice_heard)
+        self._val("brain_line", self.brain[0] or "Brain: checking ...")
         self._cfg("v_heard", show=bool(self.voice_heard))
 
     def show_parse(self, res):
@@ -1264,6 +1392,12 @@ class App:
         if s == 0 and self.calib["state"] == "running" and not self.shot0 and now - self.t_start > 12:
             self.shot0 = True
             self.take_shots("00_calibrating")
+        if self.pending is not None and not self._shot_pending:
+            self._shot_pending = True
+            self.take_shots("02_confirm")
+            if self.autoconfirm:
+                self.tee("[test] XARM_APP_AUTOCONFIRM: confirming")
+                self.confirm_pending()
         cmd_text = os.environ.get("XARM_APP_COMMAND") or (os.environ.get("XARM_APP_TEST_VOICE") and "voice")
         if s == 0:
             if self.calibrated() and self.calib["state"] != "running" and not self.busy:
@@ -1332,6 +1466,7 @@ class App:
                 self.pump(force=True)
                 self.poll_calibration()
                 self.poll_voice()
+                self.poll_think()
                 while self.req:
                     self.handle(self.req.popleft())
                 if not self.busy:
@@ -1349,6 +1484,8 @@ class App:
                         self.prof["n_preview"] += 1
                 if self.test:
                     self.test_tick(now)
+                    if self.test_result == "NOPARSE":
+                        return 2
                     if self.test_stage == 4:
                         return 0 if self.test_result == "SUCCESS" else 2
                     if now - self.t_start > 600:

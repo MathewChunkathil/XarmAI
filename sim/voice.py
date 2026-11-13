@@ -9,7 +9,7 @@
 
 Model: faster-whisper "small.en" on CUDA float16 (falls back to int8 on CPU; the device actually used is in v.device).
 The model is downloaded on first use into <project>/models/whisper (git-ignored); the download is logged.
-The recognised text only goes to the rule-based parser (sim/commands.py); there is no language model in the loop.
+The recognised text goes to sim/intent.py (rule parser first, optional local LLM proposal); the user confirms before anything moves.
 """
 import math
 import os
@@ -26,7 +26,8 @@ SAMPLE_RATE = 16000
 MAX_RECORD_S = 10.0
 MIN_RECORD_S = 0.3
 VOCAB_PROMPT = ("red cube green cube blue cube cube one cube two cube three zone one zone two zone three stack on top "
-                "place put move all cubes home")
+                "place put move all cubes home conveyor belt feed catch speed centimetres per second start stop "
+                "yes no cancel")
 
 
 _DLL_DIRS = []
