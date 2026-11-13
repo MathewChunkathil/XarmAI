@@ -120,4 +120,4 @@ Config files are YAML and mostly PLACEHOLDER values: `config/workspace/workspace
 - [docs/PROJECT_OVERVIEW_V1.md](docs/PROJECT_OVERVIEW_V1.md) - the original Version 1 project overview (real-robot scope)
 
 ## License
-No license file is included in this repository. All rights reserved by the author unless a license is added.
+MIT License - see [LICENSE](LICENSE).
